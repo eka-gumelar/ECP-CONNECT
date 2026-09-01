@@ -6,5 +6,7 @@
   "databaseURL": "https://ecp-connect-default-rtdb.asia-southeast1.firebasedatabase.app",
   "storageBucket": "ecp-connect.firebasestorage.app",
   "messagingSenderId": "975091314877",
-  "firestoreDatabaseId": "(default)"
+  "measurementId": "",
+  "oAuthClientId": "",
+  "recaptchaSiteKey": ""
 }
