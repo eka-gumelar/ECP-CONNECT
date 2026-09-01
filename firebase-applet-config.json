@@ -1,12 +1,12 @@
 {
-  "projectId": "local-alignment-qcf5x",
-  "appId": "1:263202843993:web:e96048b26a048723bab048",
-  "apiKey": "AIzaSyDnQgrkYtGAXe9C6pMKVnaxvSSyQOU_mJ0",
-  "authDomain": "local-alignment-qcf5x.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-0471b98b-c292-4acd-ad80-9f64fd43ac5c",
-  "storageBucket": "local-alignment-qcf5x.firebasestorage.app",
-  "messagingSenderId": "263202843993",
+  "projectId": "ecp-connect",
+  "appId": "1:975091314877:web:6c9f11e3da122ea79547d4",
+  "apiKey": "AIzaSyDUlWjYYv0NlEZtewL0I39aSw0Sq6p5PTo",
+  "authDomain": "ecp-connect.firebaseapp.com",
+  "databaseURL": "https://ecp-connect-default-rtdb.asia-southeast1.firebasedatabase.app",
+  "storageBucket": "ecp-connect.firebasestorage.app",
+  "messagingSenderId": "975091314877",
   "measurementId": "",
-  "oAuthClientId": "263202843993-c6jasn6m2ig9gg5go4nlgi7e3v12ggm1.apps.googleusercontent.com",
+  "oAuthClientId": "",
   "recaptchaSiteKey": ""
 }

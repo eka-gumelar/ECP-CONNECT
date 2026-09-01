@@ -17,13 +17,16 @@ import {
   CheckCircle2, ShieldAlert,
   Image as LucideImage, Eye, ZoomIn, ZoomOut, UploadCloud,
   ArrowLeft, Radio, AtSign, HelpCircle, Users, Settings, Clock, RotateCcw, Calendar,
-  ChevronDown, RotateCw
+  ChevronDown, RotateCw, Smile, Sparkles, ThumbsUp, Heart, SmilePlus
 } from 'lucide-react';
 import { processFileForUpload, downloadDataUrl } from '@/lib/media';
 import ShortcutsModal from './ShortcutsModal';
 import UserProfileModal from './UserProfileModal';
 import GroupInfoModal from './GroupInfoModal';
 import DirectoryModal from './DirectoryModal';
+import StickerMakerModal from './StickerMakerModal';
+import AttachmentPreviewModal, { PendingAttachmentData } from './AttachmentPreviewModal';
+import EmojiStickerPicker, { StickerItem } from './EmojiStickerPicker';
 
 // Web Audio API notification sound (WhatsApp chime & Ping alarm)
 function playSound(type: 'receive' | 'send' | 'ping' = 'receive') {
@@ -254,6 +257,105 @@ export default function ChatApp() {
   const justSentMessageRef = useRef(false);
   const prevScrollHeightRef = useRef(0);
   const prevChatIdRef = useRef<string | null>(null);
+
+  // Optimistic UI for instant sending without delay
+  const [optimisticMessages, setOptimisticMessages] = useState<any[]>([]);
+
+  // PING Cooldown (1-minute / 60-seconds limit to prevent spam)
+  const [pingCooldownSeconds, setPingCooldownSeconds] = useState<number>(0);
+  const lastPingTimesRef = useRef<Record<string, number>>({});
+
+  // Emoji & Sticker Picker State
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showStickerMaker, setShowStickerMaker] = useState(false);
+  const [stickerMakerInitialImage, setStickerMakerInitialImage] = useState<File | string | null>(null);
+  const [customStickers, setCustomStickers] = useState<StickerItem[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = localStorage.getItem('ecp_connect_custom_stickers');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Attachment Preview with Caption modal state
+  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachmentData | null>(null);
+  const [showAttachmentModal, setShowAttachmentModal] = useState(false);
+  const lastPasteTimeRef = useRef<number>(0);
+
+  // Message Reactions & Hover State
+  const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
+  const [reactionPickerMessage, setReactionPickerMessage] = useState<any | null>(null);
+
+  // Ping Cooldown Interval Decrementer (1s tick)
+  useEffect(() => {
+    if (pingCooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setPingCooldownSeconds(prev => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [pingCooldownSeconds]);
+
+  // Combined Server + Optimistic Messages
+  const combinedMessages = useMemo(() => {
+    const serverIds = new Set(messages.map(m => m.id));
+    const pendingForChat = optimisticMessages.filter(opt => {
+      if (opt.chatId !== activeChat?.id) return false;
+      if (serverIds.has(opt.id)) return false;
+      // Match with server doc if already synced
+      const alreadySynced = messages.some(m => 
+        (m.clientTempId && m.clientTempId === opt.id) ||
+        (m.senderId === opt.senderId && m.text === opt.text && m.type === opt.type && opt.clientTime && Math.abs((m.timestamp?.toDate ? m.timestamp.toDate().getTime() : 0) - opt.clientTime) < 15000)
+      );
+      return !alreadySynced;
+    });
+    return [...messages, ...pendingForChat];
+  }, [messages, optimisticMessages, activeChat?.id]);
+
+  // Save custom sticker to collection & localStorage
+  const handleSaveCustomSticker = useCallback((dataUrl: string) => {
+    const newSticker: StickerItem = {
+      id: 'custom_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+      name: 'Stiker Kustom',
+      url: dataUrl,
+      isCustom: true
+    };
+    setCustomStickers(prev => {
+      const updated = [newSticker, ...prev.filter(s => s.url !== dataUrl).slice(0, 49)];
+      try {
+        localStorage.setItem('ecp_connect_custom_stickers', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    showToast('Stiker kustom disimpan ke koleksi! ✨');
+  }, [showToast]);
+
+  // Delete custom sticker from collection
+  const handleDeleteCustomSticker = useCallback((id: string) => {
+    setCustomStickers(prev => {
+      const updated = prev.filter(s => s.id !== id);
+      try {
+        localStorage.setItem('ecp_connect_custom_stickers', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    showToast('Stiker dihapus dari koleksi.');
+  }, [showToast]);
+
+  // Helper to safely stop PING sound loop for a chat
+  const stopPingForChat = useCallback((chatId: string) => {
+    if (pingTimersRef.current[chatId]) {
+      clearInterval(pingTimersRef.current[chatId]);
+      delete pingTimersRef.current[chatId];
+    }
+  }, []);
 
   // Message pagination (Quota-friendly: only fetch the last 50 messages by default)
   const [messagesLimit, setMessagesLimit] = useState(50);
@@ -652,15 +754,18 @@ export default function ChatApp() {
         }
         setLoadingOlderMessages(false);
       } else if (isInitialMsgLoadRef.current) {
-        // Initial chat load: auto-scroll to the bottom instantly
+        // Initial chat load: auto-scroll to the bottom immediately and retry as images load
         isInitialMsgLoadRef.current = false;
         isNearBottomRef.current = true;
         setShowScrollBottomBtn(false);
         setNewMessagesWhileScrolled(0);
-        // Retry scroll a few times to account for image rendering delays
-        setTimeout(() => scrollToBottom(false), 10);
+        // Stop ping loop if this chat had active ping
+        stopPingForChat(currentChatId);
+        // Instant scroll down
+        scrollToBottom(false);
+        setTimeout(() => scrollToBottom(false), 50);
         setTimeout(() => scrollToBottom(false), 150);
-        setTimeout(() => scrollToBottom(false), 500);
+        setTimeout(() => scrollToBottom(false), 400);
       } else if (justSentMessageRef.current) {
         // Current user sent a message: always scroll down smoothly
         justSentMessageRef.current = false;
@@ -727,7 +832,7 @@ export default function ChatApp() {
     });
 
     return () => unsubscribe();
-  }, [activeChat?.id, activeChat?.type, activeChatUnreadFor, user?.id, messagesLimit, loadAllTimeMessages, showToast, sendDesktopNotification, scrollToBottom]);
+  }, [activeChat?.id, activeChat?.type, activeChatUnreadFor, user?.id, messagesLimit, loadAllTimeMessages, showToast, sendDesktopNotification, scrollToBottom, stopPingForChat]);
 
   // 6. Track Presence of the Other User in Active Chat (Single Document Listener)
   const otherContactId = (activeChat && activeChat.type !== 'group' && user?.id)
@@ -774,16 +879,42 @@ export default function ChatApp() {
     return () => window.removeEventListener('click', handleClickOutside);
   }, []);
 
-  // Ping feature: urgent attention call (desktop notification only, no screen shake)
+  // Ping feature: urgent attention call (desktop notification only, 1-min cooldown, no spam)
   const sendPing = useCallback(async () => {
     if (!activeChat || !user || !profile) return;
+    
+    // 1-minute cooldown check
+    if (pingCooldownSeconds > 0) {
+      showToast(`Tunggu ${pingCooldownSeconds} detik sebelum mengirim PING lagi.`);
+      return;
+    }
+
     try {
+      setPingCooldownSeconds(60); // Set 1-minute cooldown
       playSound('ping');
       justSentMessageRef.current = true;
       isNearBottomRef.current = true;
       setShowScrollBottomBtn(false);
       setNewMessagesWhileScrolled(0);
       setTimeout(() => scrollToBottom(true), 50);
+
+      // Create optimistic ping message
+      const tempId = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+      const optimisticPing = {
+        id: tempId,
+        clientTempId: tempId,
+        chatId: activeChat.id,
+        type: 'ping',
+        text: '🔔 PING!',
+        senderId: user.id,
+        senderName: profile.name,
+        clientTime: Date.now(),
+        timestamp: new Date(),
+        status: 'sending',
+        readBy: [user.id],
+        isRead: false
+      };
+      setOptimisticMessages(prev => [...prev, optimisticPing]);
 
       const msgRef = doc(collection(db, `chats/${activeChat.id}/messages`));
       const otherUserIds = activeChat.participants?.filter((id: string) => id !== user.id) || [];
@@ -796,7 +927,8 @@ export default function ChatApp() {
         timestamp: serverTimestamp(),
         status: 'sent',
         readBy: [user.id],
-        isRead: false
+        isRead: false,
+        clientTempId: tempId
       });
 
       await updateDoc(doc(db, 'chats', activeChat.id), {
@@ -811,7 +943,94 @@ export default function ChatApp() {
       console.error(err);
       showToast('Gagal mengirim PING');
     }
+  }, [activeChat, user, profile, showToast, scrollToBottom, pingCooldownSeconds]);
+
+  // Send Sticker message
+  const sendSticker = useCallback(async (stickerUrl: string, caption?: string) => {
+    if (!activeChat || !user || !profile) return;
+    
+    const tempId = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+    const optimisticSticker = {
+      id: tempId,
+      clientTempId: tempId,
+      chatId: activeChat.id,
+      type: 'sticker',
+      text: caption || 'Stiker',
+      fileData: stickerUrl,
+      senderId: user.id,
+      senderName: profile.name,
+      clientTime: Date.now(),
+      timestamp: new Date(),
+      status: 'sending',
+      readBy: [user.id],
+      isRead: false
+    };
+
+    setOptimisticMessages(prev => [...prev, optimisticSticker]);
+    playSound('send');
+    justSentMessageRef.current = true;
+    isNearBottomRef.current = true;
+    setShowScrollBottomBtn(false);
+    setNewMessagesWhileScrolled(0);
+    setTimeout(() => scrollToBottom(true), 50);
+
+    try {
+      const otherUserIds = activeChat.participants?.filter((id: string) => id !== user.id) || [];
+      await addDoc(collection(db, `chats/${activeChat.id}/messages`), {
+        type: 'sticker',
+        text: caption || 'Stiker',
+        fileData: stickerUrl,
+        senderId: user.id,
+        senderName: profile.name,
+        timestamp: serverTimestamp(),
+        status: 'sent',
+        readBy: [user.id],
+        isRead: false,
+        clientTempId: tempId
+      });
+
+      await updateDoc(doc(db, 'chats', activeChat.id), {
+        lastMessage: '✨ Stiker',
+        lastMessageTime: serverTimestamp(),
+        unreadFor: otherUserIds
+      });
+    } catch (err) {
+      console.error('Error sending sticker:', err);
+      showToast('Gagal mengirim stiker. Coba lagi.');
+    }
   }, [activeChat, user, profile, showToast, scrollToBottom]);
+
+  // Message Reactions Toggle
+  const handleToggleReaction = useCallback(async (msg: any, emoji: string) => {
+    if (!activeChat || !user) return;
+    const currentReactions: Record<string, string[]> = msg.reactions ? { ...msg.reactions } : {};
+    const usersForEmoji: string[] = Array.isArray(currentReactions[emoji]) ? [...currentReactions[emoji]] : [];
+    const hasReacted = usersForEmoji.includes(user.id);
+
+    const updatedUsers = hasReacted 
+      ? usersForEmoji.filter((uid: string) => uid !== user.id)
+      : [...usersForEmoji, user.id];
+
+    if (updatedUsers.length === 0) {
+      delete currentReactions[emoji];
+    } else {
+      currentReactions[emoji] = updatedUsers;
+    }
+
+    // Local state update for immediate feedback
+    setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, reactions: { ...currentReactions } } : m));
+    setOptimisticMessages(prev => prev.map(m => m.id === msg.id ? { ...m, reactions: { ...currentReactions } } : m));
+
+    try {
+      if (!msg.id.startsWith('temp_')) {
+        await updateDoc(doc(db, `chats/${activeChat.id}/messages`, msg.id), {
+          reactions: currentReactions
+        });
+      }
+    } catch (err) {
+      console.error('Error updating reaction:', err);
+    }
+  }, [activeChat, user]);
 
   // Global Keyboard Shortcuts
   useEffect(() => {
@@ -1120,10 +1339,37 @@ export default function ChatApp() {
     }
   };
 
-  // Send message
+  // Prepare attachment for preview modal with caption
+  const handleFileSelectedForPreview = useCallback((file: File, customName?: string) => {
+    if (!file || !activeChat) return;
+    const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(file.name || customName || '');
+    const sizeFormatted = file.size > 1024 * 1024 
+      ? (file.size / (1024 * 1024)).toFixed(1) + ' MB' 
+      : Math.max(1, Math.round(file.size / 1024)) + ' KB';
+
+    let previewUrl = '';
+    try {
+      previewUrl = isImage ? URL.createObjectURL(file) : '';
+    } catch {
+      previewUrl = '';
+    }
+
+    setPendingAttachment({
+      file,
+      previewUrl,
+      fileName: customName || file.name || (isImage ? 'gambar.png' : 'dokumen'),
+      fileSize: sizeFormatted,
+      fileType: file.type || (isImage ? 'image/png' : 'application/octet-stream'),
+      isImage,
+      caption: newMessage.trim()
+    });
+    setShowAttachmentModal(true);
+  }, [activeChat, newMessage]);
+
+  // Send text message (Instant Optimistic UI without delay)
   const sendMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!newMessage.trim() || !activeChat || !user) return;
+    if (!newMessage.trim() || !activeChat || !user || !profile) return;
 
     const text = newMessage.trim();
     const replyContext = replyingTo ? {
@@ -1132,31 +1378,53 @@ export default function ChatApp() {
       senderName: replyingTo.senderName || 'Rekan'
     } : null;
 
+    const tempId = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+
+    // Instant local optimistic message
+    const optimisticMsg = {
+      id: tempId,
+      clientTempId: tempId,
+      chatId: activeChat.id,
+      text,
+      senderId: user.id,
+      senderName: profile.name || 'User',
+      type: 'text',
+      timestamp: new Date(),
+      clientTime: Date.now(),
+      status: 'sending',
+      readBy: [user.id],
+      isRead: false,
+      replyTo: replyContext
+    };
+
+    setOptimisticMessages(prev => [...prev, optimisticMsg]);
     setNewMessage('');
     setMentionQuery(null);
     setReplyingTo(null);
     setSendingFailed(null);
+    setShowEmojiPicker(false);
+
+    playSound('send');
+    justSentMessageRef.current = true;
+    isNearBottomRef.current = true;
+    setShowScrollBottomBtn(false);
+    setNewMessagesWhileScrolled(0);
+    setTimeout(() => scrollToBottom(true), 50);
 
     try {
-      playSound('send');
-      justSentMessageRef.current = true;
-      isNearBottomRef.current = true;
-      setShowScrollBottomBtn(false);
-      setNewMessagesWhileScrolled(0);
-      setTimeout(() => scrollToBottom(true), 50);
-
       const otherUserIds = activeChat.participants?.filter((id: string) => id !== user.id) || [];
 
       await addDoc(collection(db, `chats/${activeChat.id}/messages`), {
         text,
         senderId: user.id,
-        senderName: profile?.name || 'User',
+        senderName: profile.name || 'User',
         type: 'text',
         timestamp: serverTimestamp(),
-        status: 'sent', // sent -> delivered -> read
+        status: 'sent',
         readBy: [user.id],
         isRead: false,
-        replyTo: replyContext
+        replyTo: replyContext,
+        clientTempId: tempId
       });
 
       await updateDoc(doc(db, 'chats', activeChat.id), {
@@ -1165,55 +1433,92 @@ export default function ChatApp() {
         unreadFor: otherUserIds
       });
     } catch (e: any) {
-      console.error(e);
+      console.error('Send message error:', e);
+      setOptimisticMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m));
       setSendingFailed('Pesan tidak terkirim. Klik untuk mencoba lagi.');
     }
   };
 
-  // Robust Media & File upload handler (PNG, JPG, WebP, Documents)
-  const uploadAndSendMedia = async (file: File, customName?: string) => {
+  // Media & File upload handler with caption & optimistic preview
+  const uploadAndSendMedia = async (file: File, customName?: string, customCaption?: string) => {
     if (!file || !activeChat || !user || !profile) return;
 
     setIsUploadingMedia(true);
     const isImageFile = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(file.name || customName || '');
     setUploadingStatus(isImageFile ? 'Mengoptimalkan gambar PNG/foto...' : 'Mempersiapkan dokumen...');
 
+    const tempId = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+    const finalCaption = (customCaption !== undefined ? customCaption : newMessage).trim();
+
+    const replyContext = replyingTo ? {
+      id: replyingTo.id,
+      text: replyingTo.text || (replyingTo.type === 'image' || replyingTo.fileType?.startsWith('image/') ? `📷 ${replyingTo.fileName || 'Gambar'}` : `📎 ${replyingTo.fileName || 'Lampiran'}`),
+      senderName: replyingTo.senderName || 'Rekan'
+    } : null;
+
+    let localPreviewUrl = '';
+    if (isImageFile) {
+      try {
+        localPreviewUrl = URL.createObjectURL(file);
+      } catch {}
+    }
+
+    // Instant optimistic message in chat
+    const optimisticMedia = {
+      id: tempId,
+      clientTempId: tempId,
+      chatId: activeChat.id,
+      text: finalCaption || (isImageFile ? `📷 ${customName || file.name}` : `Mengirim lampiran: ${customName || file.name}`),
+      senderId: user.id,
+      senderName: profile.name || 'User',
+      type: isImageFile ? 'image' : 'file',
+      fileName: customName || file.name,
+      fileSize: (file.size / 1024 > 1000 ? (file.size / (1024 * 1024)).toFixed(1) + ' MB' : Math.round(file.size / 1024) + ' KB'),
+      fileType: file.type,
+      fileData: localPreviewUrl,
+      timestamp: new Date(),
+      clientTime: Date.now(),
+      status: 'sending',
+      readBy: [user.id],
+      isRead: false,
+      replyTo: replyContext
+    };
+
+    setOptimisticMessages(prev => [...prev, optimisticMedia]);
+    setNewMessage('');
+    setReplyingTo(null);
+    setShowEmojiPicker(false);
+
+    playSound('send');
+    justSentMessageRef.current = true;
+    isNearBottomRef.current = true;
+    setShowScrollBottomBtn(false);
+    setNewMessagesWhileScrolled(0);
+    setTimeout(() => scrollToBottom(true), 50);
+
     try {
       const processed = await processFileForUpload(file, customName);
       setUploadingStatus('Mengirim ke obrolan...');
 
-      playSound('send');
-      justSentMessageRef.current = true;
-      isNearBottomRef.current = true;
-      setShowScrollBottomBtn(false);
-      setNewMessagesWhileScrolled(0);
-      setTimeout(() => scrollToBottom(true), 50);
-
       const otherUserIds = activeChat.participants?.filter((id: string) => id !== user.id) || [];
-      const captionText = newMessage.trim();
-
-      const replyContext = replyingTo ? {
-        id: replyingTo.id,
-        text: replyingTo.text || (replyingTo.type === 'image' || replyingTo.fileType?.startsWith('image/') ? `📷 ${replyingTo.fileName || 'Gambar'}` : `📎 ${replyingTo.fileName || 'Lampiran'}`),
-        senderName: replyingTo.senderName || 'Rekan'
-      } : null;
 
       await addDoc(collection(db, `chats/${activeChat.id}/messages`), {
-        text: captionText || (processed.isImage ? `📷 ${processed.fileName}` : `Mengirim lampiran: ${processed.fileName}`),
+        text: finalCaption || (processed.isImage ? `📷 ${processed.fileName}` : `Mengirim lampiran: ${processed.fileName}`),
         senderId: user.id,
         senderName: profile.name || 'User',
         type: processed.isImage ? 'image' : 'file',
         fileName: processed.fileName,
         fileSize: processed.fileSize,
         fileType: processed.fileType,
-        fileData: processed.dataUrl, // Always safe, guaranteed <= 500KB
+        fileData: processed.dataUrl,
         width: processed.width || null,
         height: processed.height || null,
         timestamp: serverTimestamp(),
         status: 'sent',
         readBy: [user.id],
         isRead: false,
-        replyTo: replyContext
+        replyTo: replyContext,
+        clientTempId: tempId
       });
 
       await updateDoc(doc(db, 'chats', activeChat.id), {
@@ -1222,11 +1527,10 @@ export default function ChatApp() {
         unreadFor: otherUserIds
       });
 
-      setNewMessage('');
-      setReplyingTo(null);
       showToast(processed.isImage ? 'Gambar PNG berhasil terkirim! 📷' : 'Dokumen berhasil dikirim! 📎');
     } catch (err: any) {
       console.error('Upload error:', err);
+      setOptimisticMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m));
       showToast(err.message || 'Gagal mengirim file. Silakan coba lagi.');
     } finally {
       setIsUploadingMedia(false);
@@ -1234,28 +1538,32 @@ export default function ChatApp() {
     }
   };
 
-  // File upload input event adapter
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // File upload input event adapter -> Routes to Preview with Caption
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      await uploadAndSendMedia(file);
+      handleFileSelectedForPreview(file);
     }
     e.target.value = '';
   };
 
-  // Drag & drop file handler
-  const handleDropFiles = async (files: FileList | null) => {
+  // Drag & drop file handler -> Routes to Preview with Caption
+  const handleDropFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    for (let i = 0; i < files.length; i++) {
-      await uploadAndSendMedia(files[i]);
-    }
+    handleFileSelectedForPreview(files[0]);
   };
 
-  // Clipboard Paste handler (captures PNG screenshots automatically via Ctrl+V)
-  const handlePaste = async (e: React.ClipboardEvent) => {
+  // Clipboard Paste handler (Single trigger debounced + Caption preview)
+  const handlePaste = (e: React.ClipboardEvent) => {
     if (!activeChat) return;
+    const now = Date.now();
+    if (now - lastPasteTimeRef.current < 600) {
+      e.preventDefault();
+      return;
+    }
+
     const items = e.clipboardData?.items;
-    if (!items) return;
+    if (!items || items.length === 0) return;
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -1263,13 +1571,30 @@ export default function ChatApp() {
         const file = item.getAsFile();
         if (file) {
           e.preventDefault();
+          e.stopPropagation();
+          lastPasteTimeRef.current = now;
           const timeLabel = new Date().toLocaleTimeString('id-ID', { hour12: false }).replace(/:/g, '');
-          showToast('Mengirim tangkapan layar PNG dari clipboard...');
-          await uploadAndSendMedia(file, `Screenshot_${timeLabel}.png`);
+          const customName = `Screenshot_${timeLabel}.png`;
+          handleFileSelectedForPreview(file, customName);
           return;
         }
       }
     }
+  };
+
+  const handleCancelAttachment = () => {
+    if (pendingAttachment?.previewUrl) {
+      try {
+        URL.revokeObjectURL(pendingAttachment.previewUrl);
+      } catch {}
+    }
+    setPendingAttachment(null);
+    setShowAttachmentModal(false);
+  };
+
+  const handleSendAttachmentWithCaption = (data: PendingAttachmentData) => {
+    uploadAndSendMedia(data.file, data.fileName, data.caption);
+    handleCancelAttachment();
   };
 
   // App Lock Handlers
@@ -1504,9 +1829,17 @@ export default function ChatApp() {
 
   // Render message status tick marks
   const renderMessageStatus = (msg: any) => {
+    if (msg.status === 'sending' || msg.id?.startsWith('temp_')) {
+      return (
+        <span className="inline-flex items-center text-[#8696a0] ml-1" title="Sedang mengirim...">
+          <RotateCw className="w-2.5 h-2.5 animate-spin" />
+        </span>
+      );
+    }
+
     if (msg.status === 'failed') {
       return (
-        <span className="inline-flex items-center text-red-500 gap-0.5" title="Tidak terkirim">
+        <span className="inline-flex items-center text-red-500 gap-0.5 ml-1" title="Gagal terkirim. Klik untuk coba lagi.">
           <AlertCircle className="w-3 h-3" />
         </span>
       );
@@ -2160,7 +2493,7 @@ export default function ChatApp() {
             </div>
 
             {(() => {
-              const filteredMessages = messages.filter((msg) => {
+              const filteredMessages = combinedMessages.filter((msg) => {
                 if (chatSearchKeyword.trim()) {
                   const q = chatSearchKeyword.toLowerCase();
                   const textMatch = msg.text?.toLowerCase().includes(q);
@@ -2202,10 +2535,14 @@ export default function ChatApp() {
                   return null;
                 }
 
+                const isHovered = hoveredMessageId === msg.id;
+
                 return (
                   <div 
                     key={msg.id || idx} 
-                    className={`flex flex-col group ${isMine ? 'items-end' : 'items-start'}`}
+                    className={`flex flex-col group relative ${isMine ? 'items-end' : 'items-start'}`}
+                    onMouseEnter={() => setHoveredMessageId(msg.id)}
+                    onMouseLeave={() => setHoveredMessageId(null)}
                     onContextMenu={(e) => handleMessageContextMenu(e, msg)}
                   >
                     {activeChat.type === 'group' && !isMine && (
@@ -2229,171 +2566,253 @@ export default function ChatApp() {
                       </div>
                     )}
                     
-                    <div className={`max-w-[85%] md:max-w-[70%] p-2.5 rounded-xl shadow-xs relative transition-all ${
-                      isMine ? 'bg-[#d9fdd3] rounded-tr-none' : 'bg-white rounded-tl-none'
-                    }`}>
-                      
-                      {/* Quoted reply banner if this message is a reply */}
-                      {msg.replyTo && (
-                        <div className="mb-2 p-2 bg-black/5 rounded-lg border-l-4 border-[#128c7e] text-xs">
-                          <p className="font-bold text-[10px] text-[#128c7e]">{msg.replyTo.senderName}</p>
-                          <p className="text-[11px] text-[#555] line-clamp-2 italic">{msg.replyTo.text}</p>
-                        </div>
-                      )}
-
-                      {/* Deleted message state */}
-                      {msg.isDeleted ? (
-                        <p className="text-xs italic text-[#888] flex items-center gap-1">
-                          <span>{msg.text}</span>
-                        </p>
-                      ) : msg.type === 'ping' ? (
-                        /* PING Attention Call Item */
-                        <div className="flex items-center gap-2.5 py-1 px-1.5 bg-amber-50/80 rounded-lg border border-amber-300/80 text-amber-900">
-                          <div className="w-8 h-8 rounded-full bg-amber-400/30 flex items-center justify-center text-amber-700 shrink-0 animate-bounce">
-                            <Radio className="w-4 h-4 text-amber-700" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-xs font-black tracking-wider text-amber-900 flex items-center gap-1">
-                              <span>🔔 PING! Panggilan Perhatian</span>
-                            </p>
-                            <p className="text-[10px] text-amber-700 truncate">
-                              {isMine ? 'Anda memanggil perhatian obrolan ini' : `${senderName} memanggil perhatian Anda!`}
-                            </p>
-                          </div>
-                        </div>
-                      ) : (msg.type === 'image' || (msg.type === 'file' && (msg.fileType?.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(msg.fileName || '')))) ? (
-                        <div className="flex flex-col gap-1.5">
-                          {msg.fileData ? (
-                            <div 
-                              onClick={() => setActiveLightboxImage({
-                                url: msg.fileData,
-                                name: msg.fileName || 'Gambar PNG',
-                                sender: senderName,
-                                time: msg.timestamp,
-                                size: msg.fileSize
-                              })}
-                              className="relative group/img cursor-pointer overflow-hidden rounded-lg bg-black/5 border border-black/5 max-w-[340px]"
-                            >
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img 
-                                src={msg.fileData} 
-                                alt={msg.fileName || 'Gambar'} 
-                                className="w-full max-h-72 object-cover rounded-lg group-hover:scale-[1.01] transition-transform duration-200 block"
-                                loading="lazy"
-                              />
-                              {/* Hover overlay with quick preview and download */}
-                              <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center gap-2.5">
-                                <span className="p-2 bg-white/95 rounded-full text-[#1c1e21] shadow hover:bg-white transition-colors" title="Buka Gambar">
-                                  <Eye className="w-4 h-4 text-[#128c7e]" />
-                                </span>
-                                <button 
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    downloadDataUrl(msg.fileData, msg.fileName || 'gambar.png');
-                                  }}
-                                  className="p-2 bg-white/95 rounded-full text-[#1c1e21] shadow hover:bg-white transition-colors"
-                                  title="Unduh Gambar"
-                                >
-                                  <Download className="w-4 h-4 text-[#128c7e]" />
-                                </button>
-                              </div>
-                              {/* Name and size bar */}
-                              <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-2.5 py-1.5 flex items-center justify-between text-white text-[10px]">
-                                <span className="truncate max-w-[200px] font-medium drop-shadow-xs">{msg.fileName}</span>
-                                <span className="font-mono text-[9px] opacity-90 drop-shadow-xs">{msg.fileSize}</span>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-amber-800 text-xs">
-                              <p className="font-semibold">⚠️ Pratinjau gambar tidak tersedia</p>
-                              <p className="text-[10px] text-amber-700">{msg.fileName}</p>
-                            </div>
-                          )}
-
-                          {/* Caption text if any */}
-                          {msg.text && !msg.text.startsWith('Mengirim lampiran:') && !msg.text.startsWith('📷 ') && (
-                            <p className="text-xs leading-relaxed text-[#1c1e21] whitespace-pre-wrap break-words px-0.5">
-                              {renderFormattedText(msg.text)}
-                            </p>
-                          )}
-                        </div>
-                      ) : msg.type === 'file' ? (
-                        <div className="flex items-center gap-2.5 bg-[#f0f2f5] p-2.5 rounded-lg border border-[#e1e4e8] mb-1">
-                          <div className="bg-[#128c7e] p-2 rounded-lg text-white">
-                            <FileText className="w-5 h-5" />
-                          </div>
-                          <div className="overflow-hidden min-w-[140px]">
-                            <p className="text-xs font-semibold text-[#1c1e21] truncate">{msg.fileName}</p>
-                            <p className="text-[10px] text-[#667781]">{msg.fileSize || 'Dokumen'}</p>
-                          </div>
-                          {msg.fileData && (
-                            <button 
+                    <div className="relative flex items-center gap-1 max-w-[90%] md:max-w-[75%]">
+                      {/* Floating Quick Reaction Bar (WhatsApp style on hover) */}
+                      {isHovered && !msg.isDeleted && (
+                        <div 
+                          className={`absolute -top-7 ${isMine ? 'right-0' : 'left-0'} z-20 bg-white/95 backdrop-blur-xs shadow-md border border-[#e1e4e8] rounded-full px-2 py-0.5 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-100`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
+                            <button
+                              key={emoji}
                               type="button"
-                              onClick={() => downloadDataUrl(msg.fileData, msg.fileName || 'dokumen')}
-                              className="p-1.5 text-[#54656f] hover:text-[#128c7e] ml-auto transition-colors"
-                              title="Unduh file"
+                              onClick={() => handleToggleReaction(msg, emoji)}
+                              className="text-xs hover:scale-125 transition-transform p-0.5 cursor-pointer"
+                              title={`Beri reaksi ${emoji}`}
                             >
-                              <Download className="w-4 h-4" />
+                              {emoji}
                             </button>
-                          )}
+                          ))}
                         </div>
-                      ) : (
-                        <p className="text-xs leading-relaxed text-[#1c1e21] whitespace-pre-wrap break-words">
-                          {renderFormattedText(msg.text)}
-                        </p>
                       )}
 
-                      {/* Message Footer: Timestamp & Read Status */}
-                      <div className="flex flex-col items-end gap-0.5 mt-1">
-                        <div className="flex items-center justify-end gap-1 text-[9px] text-[#667781] font-mono">
-                          {msg.starredBy?.includes(user?.id) && (
-                            <Star className="w-2.5 h-2.5 text-amber-500 fill-amber-500 mr-0.5" />
-                          )}
-                          <span>{formatTime(msg.timestamp)}</span>
-                          {isMine && !msg.isDeleted && renderMessageStatus(msg)}
-                        </div>
+                      <div className={`p-2.5 rounded-xl shadow-xs relative transition-all w-full ${
+                        msg.type === 'sticker' 
+                          ? 'bg-transparent shadow-none p-0' 
+                          : isMine ? 'bg-[#d9fdd3] rounded-tr-none' : 'bg-white rounded-tl-none'
+                      }`}>
                         
-                        {/* Group Message 'Seen By' Indicator */}
-                        {isMine && activeChat?.type === 'group' && msg.readBy && msg.readBy.length > 0 && (
-                          <div className="flex items-center -space-x-1 mt-0.5 justify-end">
-                            {msg.readBy.filter((id: string) => id !== user?.id).slice(0, 5).map((readerId: string) => {
-                              const reader = usersMap[readerId];
-                              if (!reader) return null;
-                              return (
-                                <div 
-                                  key={readerId} 
-                                  className="w-3.5 h-3.5 rounded-full border border-white flex items-center justify-center text-[6px] font-bold text-white shadow-[0_1px_2px_rgba(0,0,0,0.1)] overflow-hidden"
-                                  style={{ backgroundColor: reader.avatarColor || '#34b7f1' }}
-                                  title={`Dibaca oleh ${reader.name}`}
-                                >
-                                  {reader.photoURL ? (
-                                    // eslint-disable-next-line @next/next/no-img-element
-                                    <img src={reader.photoURL} alt="" className="w-full h-full object-cover" />
-                                  ) : (
-                                    reader.name?.charAt(0).toUpperCase()
-                                  )}
-                                </div>
-                              );
-                            })}
-                            {msg.readBy.filter((id: string) => id !== user?.id).length > 5 && (
-                              <div className="w-3.5 h-3.5 rounded-full border border-white flex items-center justify-center bg-[#f0f2f5] text-[#54656f] text-[6px] font-bold shadow-[0_1px_2px_rgba(0,0,0,0.1)]">
-                                +
-                              </div>
-                            )}
+                        {/* Quoted reply banner if this message is a reply */}
+                        {msg.replyTo && (
+                          <div className="mb-2 p-2 bg-black/5 rounded-lg border-l-4 border-[#128c7e] text-xs">
+                            <p className="font-bold text-[10px] text-[#128c7e]">{msg.replyTo.senderName}</p>
+                            <p className="text-[11px] text-[#555] line-clamp-2 italic">{msg.replyTo.text}</p>
                           </div>
                         )}
-                      </div>
 
-                      {/* Quick right-click trigger icon on hover */}
-                      <button
-                        onClick={(e) => handleMessageContextMenu(e, msg)}
-                        className="absolute top-1 right-1 p-1 opacity-0 group-hover:opacity-100 bg-white/70 hover:bg-white rounded-md text-[#54656f] transition-opacity shadow-xs"
-                        title="Menu Opsi Pesan"
-                      >
-                        <MoreVertical className="w-3 h-3" />
-                      </button>
+                        {/* Deleted message state */}
+                        {msg.isDeleted ? (
+                          <p className="text-xs italic text-[#888] flex items-center gap-1">
+                            <span>{msg.text}</span>
+                          </p>
+                        ) : msg.type === 'sticker' ? (
+                          /* Sticker Message Item */
+                          <div className="relative group/sticker my-1 flex flex-col items-center">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={msg.fileData}
+                              alt="Stiker"
+                              className="w-32 h-32 md:w-40 md:h-40 object-contain drop-shadow-md hover:scale-105 transition-transform cursor-pointer"
+                              loading="lazy"
+                              onClick={() => {
+                                handleSaveCustomSticker(msg.fileData);
+                              }}
+                              title="Klik untuk simpan ke koleksi stiker"
+                            />
+                            {msg.text && msg.text !== 'Stiker' && (
+                              <p className="text-[11px] text-[#1c1e21] bg-white/80 backdrop-blur-xs px-2 py-0.5 rounded-full mt-1 font-medium shadow-2xs">
+                                {msg.text}
+                              </p>
+                            )}
+                          </div>
+                        ) : msg.type === 'ping' ? (
+                          /* PING Attention Call Item */
+                          <div className="flex items-center gap-2.5 py-1 px-1.5 bg-amber-50/80 rounded-lg border border-amber-300/80 text-amber-900">
+                            <div className="w-8 h-8 rounded-full bg-amber-400/30 flex items-center justify-center text-amber-700 shrink-0 animate-bounce">
+                              <Radio className="w-4 h-4 text-amber-700" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-xs font-black tracking-wider text-amber-900 flex items-center gap-1">
+                                <span>🔔 PING! Panggilan Perhatian</span>
+                              </p>
+                              <p className="text-[10px] text-amber-700 truncate">
+                                {isMine ? 'Anda memanggil perhatian obrolan ini' : `${senderName} memanggil perhatian Anda!`}
+                              </p>
+                            </div>
+                          </div>
+                        ) : (msg.type === 'image' || (msg.type === 'file' && (msg.fileType?.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(msg.fileName || '')))) ? (
+                          <div className="flex flex-col gap-1.5">
+                            {msg.fileData ? (
+                              <div 
+                                onClick={() => setActiveLightboxImage({
+                                  url: msg.fileData,
+                                  name: msg.fileName || 'Gambar PNG',
+                                  sender: senderName,
+                                  time: msg.timestamp,
+                                  size: msg.fileSize
+                                })}
+                                className="relative group/img cursor-pointer overflow-hidden rounded-lg bg-black/5 border border-black/5 max-w-[340px]"
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img 
+                                  src={msg.fileData} 
+                                  alt={msg.fileName || 'Gambar'} 
+                                  className="w-full max-h-72 object-cover rounded-lg group-hover:scale-[1.01] transition-transform duration-200 block"
+                                  loading="lazy"
+                                />
+                                {/* Hover overlay with quick preview, sticker maker & download */}
+                                <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                                  <span className="p-2 bg-white/95 rounded-full text-[#1c1e21] shadow hover:bg-white transition-colors" title="Buka Gambar">
+                                    <Eye className="w-4 h-4 text-[#128c7e]" />
+                                  </span>
+                                  <button 
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setStickerMakerInitialImage(msg.fileData);
+                                      setShowStickerMaker(true);
+                                    }}
+                                    className="p-2 bg-white/95 rounded-full text-[#1c1e21] shadow hover:bg-white transition-colors"
+                                    title="Jadikan Stiker Lucu ✨"
+                                  >
+                                    <Sparkles className="w-4 h-4 text-amber-500" />
+                                  </button>
+                                  <button 
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      downloadDataUrl(msg.fileData, msg.fileName || 'gambar.png');
+                                    }}
+                                    className="p-2 bg-white/95 rounded-full text-[#1c1e21] shadow hover:bg-white transition-colors"
+                                    title="Unduh Gambar"
+                                  >
+                                    <Download className="w-4 h-4 text-[#128c7e]" />
+                                  </button>
+                                </div>
+                                {/* Name and size bar */}
+                                <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-2.5 py-1.5 flex items-center justify-between text-white text-[10px]">
+                                  <span className="truncate max-w-[200px] font-medium drop-shadow-xs">{msg.fileName}</span>
+                                  <span className="font-mono text-[9px] opacity-90 drop-shadow-xs">{msg.fileSize}</span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-amber-800 text-xs">
+                                <p className="font-semibold">⚠️ Pratinjau gambar tidak tersedia</p>
+                                <p className="text-[10px] text-amber-700">{msg.fileName}</p>
+                              </div>
+                            )}
+
+                            {/* Caption text if any */}
+                            {msg.text && !msg.text.startsWith('Mengirim lampiran:') && !msg.text.startsWith('📷 ') && (
+                              <p className="text-xs leading-relaxed text-[#1c1e21] whitespace-pre-wrap break-words px-0.5">
+                                {renderFormattedText(msg.text)}
+                              </p>
+                            )}
+                          </div>
+                        ) : msg.type === 'file' ? (
+                          <div className="flex items-center gap-2.5 bg-[#f0f2f5] p-2.5 rounded-lg border border-[#e1e4e8] mb-1">
+                            <div className="bg-[#128c7e] p-2 rounded-lg text-white">
+                              <FileText className="w-5 h-5" />
+                            </div>
+                            <div className="overflow-hidden min-w-[140px]">
+                              <p className="text-xs font-semibold text-[#1c1e21] truncate">{msg.fileName}</p>
+                              <p className="text-[10px] text-[#667781]">{msg.fileSize || 'Dokumen'}</p>
+                            </div>
+                            {msg.fileData && (
+                              <button 
+                                type="button"
+                                onClick={() => downloadDataUrl(msg.fileData, msg.fileName || 'dokumen')}
+                                className="p-1.5 text-[#54656f] hover:text-[#128c7e] ml-auto transition-colors"
+                                title="Unduh file"
+                              >
+                                <Download className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-xs leading-relaxed text-[#1c1e21] whitespace-pre-wrap break-words">
+                            {renderFormattedText(msg.text)}
+                          </p>
+                        )}
+
+                        {/* Message Footer: Timestamp & Read Status */}
+                        <div className="flex flex-col items-end gap-0.5 mt-1">
+                          <div className="flex items-center justify-end gap-1 text-[9px] text-[#667781] font-mono">
+                            {msg.starredBy?.includes(user?.id) && (
+                              <Star className="w-2.5 h-2.5 text-amber-500 fill-amber-500 mr-0.5" />
+                            )}
+                            <span>{formatTime(msg.timestamp)}</span>
+                            {isMine && !msg.isDeleted && renderMessageStatus(msg)}
+                          </div>
+                          
+                          {/* Group Message 'Seen By' Indicator */}
+                          {isMine && activeChat?.type === 'group' && msg.readBy && msg.readBy.length > 0 && (
+                            <div className="flex items-center -space-x-1 mt-0.5 justify-end">
+                              {msg.readBy.filter((id: string) => id !== user?.id).slice(0, 5).map((readerId: string) => {
+                                const reader = usersMap[readerId];
+                                if (!reader) return null;
+                                return (
+                                  <div 
+                                    key={readerId} 
+                                    className="w-3.5 h-3.5 rounded-full border border-white flex items-center justify-center text-[6px] font-bold text-white shadow-[0_1px_2px_rgba(0,0,0,0.1)] overflow-hidden"
+                                    style={{ backgroundColor: reader.avatarColor || '#34b7f1' }}
+                                    title={`Dibaca oleh ${reader.name}`}
+                                  >
+                                    {reader.photoURL ? (
+                                      // eslint-disable-next-line @next/next/no-img-element
+                                      <img src={reader.photoURL} alt="" className="w-full h-full object-cover" />
+                                    ) : (
+                                      reader.name?.charAt(0).toUpperCase()
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {msg.readBy.filter((id: string) => id !== user?.id).length > 5 && (
+                                <div className="w-3.5 h-3.5 rounded-full border border-white flex items-center justify-center bg-[#f0f2f5] text-[#54656f] text-[6px] font-bold shadow-[0_1px_2px_rgba(0,0,0,0.1)]">
+                                  +
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Quick right-click trigger icon on hover */}
+                        <button
+                          onClick={(e) => handleMessageContextMenu(e, msg)}
+                          className="absolute top-1 right-1 p-1 opacity-0 group-hover:opacity-100 bg-white/70 hover:bg-white rounded-md text-[#54656f] transition-opacity shadow-xs cursor-pointer"
+                          title="Menu Opsi Pesan"
+                        >
+                          <MoreVertical className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
+
+                    {/* Reactions Display Chips */}
+                    {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                      <div className={`flex flex-wrap gap-1 mt-1 ${isMine ? 'justify-end pr-1' : 'justify-start pl-1'}`}>
+                        {Object.entries(msg.reactions).map(([emoji, uids]: [string, any]) => {
+                          if (!Array.isArray(uids) || uids.length === 0) return null;
+                          const reactedByMe = uids.includes(user?.id);
+                          return (
+                            <button
+                              key={emoji}
+                              type="button"
+                              onClick={() => handleToggleReaction(msg, emoji)}
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] shadow-2xs border transition-all cursor-pointer ${
+                                reactedByMe
+                                  ? 'bg-[#d9fdd3] border-[#25d366] text-[#075e54] font-bold scale-105'
+                                  : 'bg-white/90 hover:bg-white border-[#e1e4e8] text-[#1c1e21]'
+                              }`}
+                              title={`Reaksi ${emoji} (${uids.length})`}
+                            >
+                              <span>{emoji}</span>
+                              <span className="text-[10px] opacity-80">{uids.length}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 );
               });
@@ -2496,7 +2915,7 @@ export default function ChatApp() {
           )}
 
           {/* Chat Footer Input */}
-          <footer className="bg-[#f0f2f5] px-3 md:px-4 py-2.5 flex items-center gap-2 shrink-0 border-t border-[#ddd]">
+          <footer className="bg-[#f0f2f5] px-3 md:px-4 py-2.5 flex items-center gap-2 shrink-0 border-t border-[#ddd] relative">
             <input 
               type="file" 
               ref={imageInputRef} 
@@ -2511,12 +2930,48 @@ export default function ChatApp() {
               onChange={handleFileUpload} 
               className="hidden" 
             />
+
+            {/* Emoji & Sticker Picker Popup Button */}
+            <div className="relative">
+              <button 
+                type="button"
+                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                className={`p-2 rounded-full transition-colors cursor-pointer ${
+                  showEmojiPicker 
+                    ? 'bg-[#128c7e] text-white' 
+                    : 'text-[#54656f] hover:text-[#128c7e] hover:bg-[#e1e4e8]'
+                }`}
+                title="Emoji & Stiker"
+              >
+                <Smile className="w-5 h-5" />
+              </button>
+
+              {/* Emoji & Sticker Floating Panel */}
+              <EmojiStickerPicker
+                isOpen={showEmojiPicker}
+                onClose={() => setShowEmojiPicker(false)}
+                onSelectEmoji={(emoji) => {
+                  setNewMessage(prev => prev + emoji);
+                }}
+                onSelectSticker={(stickerUrl) => {
+                  setShowEmojiPicker(false);
+                  sendSticker(stickerUrl);
+                }}
+                customStickers={customStickers}
+                onOpenStickerMaker={() => {
+                  setShowEmojiPicker(false);
+                  setStickerMakerInitialImage(null);
+                  setShowStickerMaker(true);
+                }}
+                onDeleteCustomSticker={handleDeleteCustomSticker}
+              />
+            </div>
             
             <button 
               type="button"
               onClick={() => imageInputRef.current?.click()}
               disabled={isUploadingMedia}
-              className="text-[#54656f] hover:text-[#128c7e] p-2 hover:bg-[#e1e4e8] rounded-full transition-colors disabled:opacity-40"
+              className="text-[#54656f] hover:text-[#128c7e] p-2 hover:bg-[#e1e4e8] rounded-full transition-colors disabled:opacity-40 cursor-pointer"
               title="Kirim Foto / Gambar PNG (Screenshot)"
             >
               <LucideImage className="w-5 h-5" />
@@ -2526,7 +2981,7 @@ export default function ChatApp() {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={isUploadingMedia}
-              className="text-[#54656f] hover:text-[#128c7e] p-2 hover:bg-[#e1e4e8] rounded-full transition-colors disabled:opacity-40"
+              className="text-[#54656f] hover:text-[#128c7e] p-2 hover:bg-[#e1e4e8] rounded-full transition-colors disabled:opacity-40 cursor-pointer"
               title="Lampirkan Dokumen / File Lainnya"
             >
               <Paperclip className="w-5 h-5" />
@@ -2538,7 +2993,7 @@ export default function ChatApp() {
                 value={newMessage}
                 onChange={handleMessageInputChange}
                 onPaste={handlePaste}
-                placeholder={activeChat.type === 'group' ? "Ketik pesan atau ketik @ untuk tag anggota..." : "Ketik pesan atau tempel gambar PNG..."}
+                placeholder={activeChat.type === 'group' ? "Ketik pesan atau ketik @ untuk tag anggota..." : "Ketik pesan atau tempel gambar..."}
                 className="flex-1 bg-white border-none rounded-xl px-4 py-2.5 text-xs outline-none shadow-xs text-[#1c1e21] focus:ring-1 focus:ring-[#128c7e]"
               />
               <button 
@@ -3093,6 +3548,38 @@ export default function ChatApp() {
       <ShortcutsModal
         isOpen={showShortcutsModal}
         onClose={() => setShowShortcutsModal(false)}
+      />
+
+      {/* Attachment Preview Modal with Caption (WhatsApp Style) */}
+      <AttachmentPreviewModal
+        attachment={pendingAttachment}
+        isOpen={Boolean(pendingAttachment && showAttachmentModal)}
+        onClose={handleCancelAttachment}
+        onSend={handleSendAttachmentWithCaption}
+        onOpenStickerMaker={(file) => {
+          handleCancelAttachment();
+          setStickerMakerInitialImage(file);
+          setShowStickerMaker(true);
+        }}
+      />
+
+      {/* Sticker Maker Modal (Create/Edit Sticker with Text, Draw, Crop) */}
+      <StickerMakerModal
+        isOpen={showStickerMaker}
+        onClose={() => {
+          setShowStickerMaker(false);
+          setStickerMakerInitialImage(null);
+        }}
+        initialImage={stickerMakerInitialImage}
+        onSendSticker={(stickerDataUrl, caption) => {
+          handleSaveCustomSticker(stickerDataUrl);
+          sendSticker(stickerDataUrl, caption);
+          setShowStickerMaker(false);
+        }}
+        onSaveToCollection={(stickerDataUrl) => {
+          handleSaveCustomSticker(stickerDataUrl);
+          showToast('Stiker berhasil disimpan ke koleksi!');
+        }}
       />
 
     </div>
