@@ -1,0 +1,25 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users collection: Allow read and updates for profiles, prevent deletion
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if false;
+    }
+
+    // Chats collection: Allow participation
+    match /chats/{chatId} {
+      allow read: if true;
+      allow create, update, delete: if true;
+
+      // Messages subcollection
+      match /messages/{messageId} {
+        allow read: if true;
+        allow create, update, delete: if true;
+      }
+    }
+  }
+}
+

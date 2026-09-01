@@ -1,0 +1,6 @@
+{
+  "name": "ECP Connect",
+  "description": "Sistem Komunikasi Internal ECP Connect dengan enkripsi, notifikasi desktop, dan kunci layar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
