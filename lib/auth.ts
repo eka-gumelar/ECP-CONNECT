@@ -220,5 +220,20 @@ export const updateUserProfilePhoto = async (userId: string, photoURL: string) =
   }
 };
 
+export const updateUserPassword = async (userId: string, newPassword: string): Promise<string> => {
+  if (!userId) return '';
+  const passwordHash = newPassword ? await hashPassword(newPassword) : '';
+  try {
+    await updateDoc(doc(db, 'users', userId), {
+      passwordHash,
+      lastSeen: serverTimestamp()
+    });
+    return passwordHash;
+  } catch (e) {
+    console.error('Error updating password', e);
+    throw e;
+  }
+};
+
 
 
