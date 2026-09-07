@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useRef, useState } from 'react';
-import { UserProfile, updateUserProfilePhoto } from '@/lib/auth';
+import { UserProfile, updateUserProfilePhoto, updateUserPassword } from '@/lib/auth';
 import { processAvatarForProfile } from '@/lib/media';
 import { 
   X, Camera, Trash2, Copy, Check, Lock, Clock, ShieldCheck, 
-  RefreshCw, LogOut, CheckCircle2 
+  RefreshCw, LogOut, CheckCircle2, Key, Eye, EyeOff, AlertCircle 
 } from 'lucide-react';
 
 interface UserProfileModalProps {
@@ -34,6 +34,14 @@ export default function UserProfileModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Change Password state (no previous password needed)
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPasswordText, setShowPasswordText] = useState(false);
+  const [passwordUpdating, setPasswordUpdating] = useState(false);
+  const [passwordError, setPasswordError] = useState('');
 
   if (!isOpen) return null;
 
@@ -112,9 +120,10 @@ export default function UserProfileModal({
           </button>
         </div>
 
-        <div className="p-6 flex flex-col items-center text-center">
+        {/* Content Container (Scrollable) */}
+        <div className="p-6 flex flex-col items-center text-center max-h-[80vh] overflow-y-auto">
           {/* Avatar with Camera Trigger */}
-          <div className="relative mb-3 group">
+          <div className="relative mb-3 group shrink-0">
             <input 
               type="file" 
               ref={fileInputRef} 
@@ -142,7 +151,7 @@ export default function UserProfileModal({
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
-              className="absolute bottom-0 right-0 p-2 bg-[#128c7e] hover:bg-[#0f7a6d] text-white rounded-full shadow-md transition-all active:scale-95 border-2 border-white"
+              className="absolute bottom-0 right-0 p-2 bg-[#128c7e] hover:bg-[#0f7a6d] text-white rounded-full shadow-md transition-all active:scale-95 border-2 border-white cursor-pointer"
               title="Ganti Foto Profil (JPG/PNG)"
             >
               {uploading ? (
@@ -158,7 +167,7 @@ export default function UserProfileModal({
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
-              className="text-xs text-[#128c7e] hover:underline font-semibold"
+              className="text-xs text-[#128c7e] hover:underline font-semibold cursor-pointer"
             >
               Ganti Foto Profil
             </button>
@@ -168,7 +177,7 @@ export default function UserProfileModal({
                 <button
                   onClick={handleRemovePhoto}
                   disabled={uploading}
-                  className="text-xs text-red-600 hover:underline flex items-center gap-1 font-medium"
+                  className="text-xs text-red-600 hover:underline flex items-center gap-1 font-medium cursor-pointer"
                 >
                   <Trash2 className="w-3 h-3" />
                   <span>Hapus Foto</span>
@@ -185,15 +194,174 @@ export default function UserProfileModal({
             <span className="font-mono font-black text-sm text-[#128c7e] tracking-wider">{profile.code}</span>
             <button 
               onClick={handleCopyCode}
-              className="p-1 hover:text-[#128c7e] text-[#667781] transition-colors ml-1"
+              className="p-1 hover:text-[#128c7e] text-[#667781] transition-colors ml-1 cursor-pointer"
               title="Salin kode"
             >
               {copied ? <Check className="w-3.5 h-3.5 text-[#25d366]" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
 
+          {/* ========================================== */}
+          {/* FITUR GANTI KATA SANDI (TANPA SANDI LAMA) */}
+          {/* ========================================== */}
+          <div className="w-full mt-5 pt-4 border-t border-[#f0f2f5] text-left">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-xs font-bold text-[#1c1e21] flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5 text-[#128c7e]" />
+                <span>Kata Sandi Akun</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPasswordForm(!showPasswordForm);
+                  setPasswordError('');
+                }}
+                className="text-xs font-semibold text-[#128c7e] hover:underline cursor-pointer"
+              >
+                {showPasswordForm ? 'Tutup' : profile.passwordHash ? 'Ganti Sandi' : '+ Pasang Sandi'}
+              </button>
+            </div>
+
+            <p className="text-[11px] text-[#667781] leading-relaxed">
+              {profile.passwordHash 
+                ? 'Akun Anda dilindungi kata sandi saat login & buka kunci layar.' 
+                : 'Belum ada sandi (login hanya menggunakan 6-digit kode unik).'}
+            </p>
+
+            {showPasswordForm && (
+              <div className="mt-3 p-3.5 bg-[#f8fafc] rounded-xl border border-[#e2e8f0] text-left animate-in fade-in duration-150">
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0f766e] mb-2.5 bg-[#ccfbf1] px-2 py-1 rounded-md">
+                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                  <span>Ganti kata sandi langsung tanpa memerlukan sandi lama</span>
+                </div>
+
+                {passwordError && (
+                  <div className="mb-2.5 p-2 bg-red-50 border border-red-200 rounded-lg text-red-600 text-[11px] flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{passwordError}</span>
+                  </div>
+                )}
+
+                <div className="space-y-2.5">
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#475569] uppercase tracking-wider mb-1">
+                      Kata Sandi Baru
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showPasswordText ? 'text' : 'password'}
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        placeholder="Minimal 4 karakter..."
+                        className="w-full bg-white border border-[#cbd5e1] focus:border-[#128c7e] rounded-lg px-3 py-1.5 text-xs text-[#1e293b] outline-none pr-8"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPasswordText(!showPasswordText)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        title={showPasswordText ? 'Sembunyikan' : 'Tampilkan'}
+                      >
+                        {showPasswordText ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#475569] uppercase tracking-wider mb-1">
+                      Konfirmasi Kata Sandi Baru
+                    </label>
+                    <input
+                      type={showPasswordText ? 'text' : 'password'}
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Ketik ulang kata sandi baru..."
+                      className="w-full bg-white border border-[#cbd5e1] focus:border-[#128c7e] rounded-lg px-3 py-1.5 text-xs text-[#1e293b] outline-none"
+                    />
+                  </div>
+
+                  <div className="pt-1 flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={passwordUpdating || !newPassword.trim()}
+                      onClick={async () => {
+                        setPasswordError('');
+                        if (!newPassword.trim()) {
+                          setPasswordError('Masukkan kata sandi baru.');
+                          return;
+                        }
+                        if (newPassword.trim().length < 4) {
+                          setPasswordError('Kata sandi minimal 4 karakter.');
+                          return;
+                        }
+                        if (newPassword !== confirmPassword) {
+                          setPasswordError('Konfirmasi kata sandi tidak cocok.');
+                          return;
+                        }
+
+                        setPasswordUpdating(true);
+                        try {
+                          const newHash = await updateUserPassword(profile.id, newPassword.trim());
+                          if (onProfileUpdated) {
+                            onProfileUpdated({ ...profile, passwordHash: newHash });
+                          }
+                          showToast('Kata sandi berhasil disimpan! 🔑');
+                          setNewPassword('');
+                          setConfirmPassword('');
+                          setShowPasswordForm(false);
+                        } catch (err: any) {
+                          console.error(err);
+                          setPasswordError(err.message || 'Gagal mengubah kata sandi');
+                        } finally {
+                          setPasswordUpdating(false);
+                        }
+                      }}
+                      className="flex-1 py-1.5 px-3 bg-[#128c7e] hover:bg-[#0f7a6d] text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                    >
+                      {passwordUpdating ? (
+                        <div className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5" />
+                      )}
+                      <span>Simpan Sandi</span>
+                    </button>
+
+                    {profile.passwordHash && (
+                      <button
+                        type="button"
+                        disabled={passwordUpdating}
+                        onClick={async () => {
+                          if (!confirm('Hapus kata sandi akun? Anda akan dapat masuk langsung hanya dengan kode 6-digit tanpa sandi.')) return;
+                          setPasswordUpdating(true);
+                          try {
+                            await updateUserPassword(profile.id, '');
+                            if (onProfileUpdated) {
+                              onProfileUpdated({ ...profile, passwordHash: '' });
+                            }
+                            showToast('Kata sandi akun telah dihapus.');
+                            setShowPasswordForm(false);
+                            setNewPassword('');
+                            setConfirmPassword('');
+                          } catch (err: any) {
+                            console.error(err);
+                            setPasswordError('Gagal menghapus kata sandi.');
+                          } finally {
+                            setPasswordUpdating(false);
+                          }
+                        }}
+                        className="py-1.5 px-2.5 text-xs text-red-600 hover:bg-red-50 rounded-lg border border-red-200 transition-colors cursor-pointer"
+                        title="Hapus kata sandi akun"
+                      >
+                        Hapus
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Auto Lock Screen Settings */}
-          <div className="w-full mt-6 pt-5 border-t border-[#f0f2f5] text-left">
+          <div className="w-full mt-4 pt-4 border-t border-[#f0f2f5] text-left">
             <label className="text-xs font-bold text-[#1c1e21] flex items-center gap-1.5 mb-2">
               <Clock className="w-3.5 h-3.5 text-[#128c7e]" />
               <span>Kunci Layar Otomatis (Auto-Lock)</span>
@@ -215,13 +383,13 @@ export default function UserProfileModal({
           </div>
 
           {/* Bottom Actions */}
-          <div className="w-full mt-5 flex flex-col gap-2">
+          <div className="w-full mt-5 flex flex-col gap-2 shrink-0">
             <button
               onClick={() => {
                 onClose();
                 onLockNow();
               }}
-              className="w-full py-2.5 px-4 bg-[#f0f2f5] hover:bg-[#ffebee] hover:text-red-700 text-[#1c1e21] rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-2 border border-[#d1d7db]"
+              className="w-full py-2.5 px-4 bg-[#f0f2f5] hover:bg-[#ffebee] hover:text-red-700 text-[#1c1e21] rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-2 border border-[#d1d7db] cursor-pointer"
             >
               <Lock className="w-3.5 h-3.5 text-red-600" />
               <span>Kunci Layar Sekarang</span>
@@ -234,7 +402,7 @@ export default function UserProfileModal({
                   onSignOutCode();
                 }
               }}
-              className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 text-[#54656f] rounded-xl text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-[#e1e4e8]"
+              className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 text-[#54656f] rounded-xl text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-[#e1e4e8] cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Ganti Akun Kode / Sign Out Kode</span>
