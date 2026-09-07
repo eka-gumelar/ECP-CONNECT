@@ -12,6 +12,8 @@ export default function ShortcutsModal({ isOpen, onClose }: ShortcutsModalProps)
   if (!isOpen) return null;
 
   const shortcuts = [
+    { key: 'Enter', desc: 'Kirim pesan' },
+    { key: 'Shift + Enter / Alt + Enter', desc: 'Baris baru / paragraf baru di pesan' },
     { key: 'Ctrl + L / Alt + L', desc: 'Kunci Layar Aplikasi (App Lock instan)' },
     { key: 'Alt + D', desc: 'Buka / Tutup Direktori Akun & Grup' },
     { key: 'Alt + N', desc: 'Cari Kode / Obrolan Baru' },
