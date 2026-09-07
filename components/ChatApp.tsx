@@ -243,9 +243,19 @@ export default function ChatApp() {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   // File upload, image lightbox & scroll
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+
+  // Auto-focus chat box when replying to a message
+  useEffect(() => {
+    if (replyingTo) {
+      setTimeout(() => {
+        chatInputRef.current?.focus();
+      }, 50);
+    }
+  }, [replyingTo]);
   const [uploadingStatus, setUploadingStatus] = useState<string | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [activeLightboxImage, setActiveLightboxImage] = useState<{
@@ -1437,11 +1447,17 @@ export default function ChatApp() {
     );
   }, [mentionQuery, activeGroupMembers]);
 
-  const handleMessageInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMessageInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const val = e.target.value;
     const pos = e.target.selectionStart || val.length;
     setNewMessage(val);
     setMentionCursorPos(pos);
+
+    // Auto-resize chat input textarea
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = 'auto';
+      chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+    }
 
     if (activeChat?.type === 'group') {
       const textBeforeCursor = val.slice(0, pos);
@@ -1456,6 +1472,44 @@ export default function ChatApp() {
     }
   };
 
+  // Handle paragraph / new line on Shift+Enter or Alt+Enter
+  const handleChatInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter') {
+      if (e.shiftKey || e.altKey) {
+        // Shift+Enter or Alt+Enter inserts a new line / paragraph
+        if (e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          const target = e.currentTarget;
+          const start = target.selectionStart;
+          const end = target.selectionEnd;
+          const val = target.value;
+          const updated = val.substring(0, start) + '\n' + val.substring(end);
+          setNewMessage(updated);
+          setTimeout(() => {
+            if (chatInputRef.current) {
+              chatInputRef.current.selectionStart = chatInputRef.current.selectionEnd = start + 1;
+              chatInputRef.current.style.height = 'auto';
+              chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+            }
+          }, 0);
+        } else {
+          // Shift+Enter natively creates a newline in textarea; adjust height smoothly
+          setTimeout(() => {
+            if (chatInputRef.current) {
+              chatInputRef.current.style.height = 'auto';
+              chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+            }
+          }, 0);
+        }
+        return;
+      }
+
+      // Normal Enter without modifier sends the message
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
   const insertMention = (name: string) => {
     const textBeforeCursor = newMessage.slice(0, mentionCursorPos);
     const lastAt = textBeforeCursor.lastIndexOf('@');
@@ -1465,6 +1519,13 @@ export default function ChatApp() {
       const updated = `${prefix}@${name} ${suffix}`;
       setNewMessage(updated);
       setMentionQuery(null);
+      setTimeout(() => {
+        if (chatInputRef.current) {
+          chatInputRef.current.style.height = 'auto';
+          chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+          chatInputRef.current.focus();
+        }
+      }, 0);
     }
   };
 
@@ -1528,6 +1589,9 @@ export default function ChatApp() {
 
     setOptimisticMessages(prev => [...prev, optimisticMsg]);
     setNewMessage('');
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = 'auto';
+    }
     setMentionQuery(null);
     setReplyingTo(null);
     setSendingFailed(null);
@@ -1776,9 +1840,9 @@ export default function ChatApp() {
     e.preventDefault();
     e.stopPropagation();
 
-    // Calculate menu position within viewport
-    const x = Math.min(e.clientX, window.innerWidth - 220);
-    const y = Math.min(e.clientY, window.innerHeight - 260);
+    // Calculate menu position within viewport safely
+    const x = Math.min(Math.max(10, e.clientX), window.innerWidth - 240);
+    const y = Math.min(Math.max(10, e.clientY), window.innerHeight - 340);
 
     setMessageContextMenu({ x, y, message: msg });
     setChatContextMenu(null);
@@ -2762,26 +2826,6 @@ export default function ChatApp() {
                     )}
                     
                     <div className="relative flex items-center gap-1 max-w-[90%] md:max-w-[75%]">
-                      {/* Floating Quick Reaction Bar (WhatsApp style on hover) */}
-                      {isHovered && !msg.isDeleted && (
-                        <div 
-                          className={`absolute -top-7 ${isMine ? 'right-0' : 'left-0'} z-20 bg-white/95 backdrop-blur-xs shadow-md border border-[#e1e4e8] rounded-full px-2 py-0.5 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-100`}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
-                            <button
-                              key={emoji}
-                              type="button"
-                              onClick={() => handleToggleReaction(msg, emoji)}
-                              className="text-xs hover:scale-125 transition-transform p-0.5 cursor-pointer"
-                              title={`Beri reaksi ${emoji}`}
-                            >
-                              {emoji}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-
                       <div className={`p-2.5 rounded-xl shadow-xs relative transition-all w-full ${
                         msg.type === 'sticker' 
                           ? 'bg-transparent shadow-none p-0' 
@@ -3147,6 +3191,13 @@ export default function ChatApp() {
                 onClose={() => setShowEmojiPicker(false)}
                 onSelectEmoji={(emoji) => {
                   setNewMessage(prev => prev + emoji);
+                  setTimeout(() => {
+                    if (chatInputRef.current) {
+                      chatInputRef.current.style.height = 'auto';
+                      chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+                      chatInputRef.current.focus();
+                    }
+                  }, 0);
                 }}
                 onSelectSticker={(stickerUrl) => {
                   setShowEmojiPicker(false);
@@ -3182,19 +3233,22 @@ export default function ChatApp() {
               <Paperclip className="w-5 h-5" />
             </button>
 
-            <form onSubmit={sendMessage} className="flex items-center gap-2 flex-1">
-              <input
-                type="text"
+            <form onSubmit={sendMessage} className="flex items-end gap-2 flex-1">
+              <textarea
+                ref={chatInputRef}
                 value={newMessage}
                 onChange={handleMessageInputChange}
+                onKeyDown={handleChatInputKeyDown}
                 onPaste={handlePaste}
-                placeholder={activeChat.type === 'group' ? "Ketik pesan atau ketik @ untuk tag anggota..." : "Ketik pesan atau tempel gambar..."}
-                className="flex-1 bg-white border-none rounded-xl px-4 py-2.5 text-xs outline-none shadow-xs text-[#1c1e21] focus:ring-1 focus:ring-[#128c7e]"
+                rows={1}
+                placeholder={activeChat.type === 'group' ? "Ketik pesan atau ketik @ untuk tag... (Shift+Enter untuk baris baru)" : "Ketik pesan atau tempel gambar... (Shift+Enter untuk baris baru)"}
+                className="flex-1 bg-white border-none rounded-xl px-4 py-2.5 text-xs outline-none shadow-xs text-[#1c1e21] focus:ring-1 focus:ring-[#128c7e] resize-none max-h-32 min-h-[38px] leading-relaxed custom-scrollbar"
               />
               <button 
                 type="submit"
                 disabled={!newMessage.trim() || isUploadingMedia}
-                className="bg-[#128c7e] p-2.5 rounded-full text-white cursor-pointer hover:bg-[#0f7a6d] transition-colors disabled:opacity-40 disabled:hover:bg-[#128c7e] shadow-sm shrink-0"
+                className="bg-[#128c7e] p-2.5 rounded-full text-white cursor-pointer hover:bg-[#0f7a6d] transition-colors disabled:opacity-40 disabled:hover:bg-[#128c7e] shadow-sm shrink-0 mb-0.5"
+                title="Kirim Pesan (Enter)"
               >
                 <Send className="w-4 h-4 ml-0.5" />
               </button>
@@ -3284,17 +3338,48 @@ export default function ChatApp() {
       {/* ========================================== */}
       {messageContextMenu && (
         <div 
-          className="fixed z-50 bg-white rounded-xl shadow-xl border border-[#e1e4e8] py-1.5 w-52 text-xs font-medium text-[#1c1e21] animate-in fade-in zoom-in-95 duration-100"
+          className="fixed z-50 bg-white rounded-xl shadow-xl border border-[#e1e4e8] py-1.5 w-56 text-xs font-medium text-[#1c1e21] animate-in fade-in zoom-in-95 duration-100 overflow-hidden"
           style={{ top: messageContextMenu.y, left: messageContextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* Reaction Bar: Muncul saat klik kanan atau klik titik 3 */}
+          {!messageContextMenu.message.isDeleted && (
+            <div className="px-3 py-2 border-b border-[#f0f2f5] bg-[#f8fafc] mb-1">
+              <div className="text-[10px] text-[#64748b] font-medium mb-1.5 px-0.5">Reaksi Pesan:</div>
+              <div className="flex items-center justify-between gap-1">
+                {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => {
+                  const hasReacted = messageContextMenu.message.reactions?.[emoji]?.includes(user?.id);
+                  return (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => {
+                        handleToggleReaction(messageContextMenu.message, emoji);
+                        setMessageContextMenu(null);
+                      }}
+                      className={`text-base p-1 rounded-lg transition-all hover:scale-130 active:scale-110 cursor-pointer ${
+                        hasReacted ? 'bg-[#d9fdd3] ring-1 ring-[#25d366]' : 'hover:bg-slate-200/60'
+                      }`}
+                      title={`Beri reaksi ${emoji}`}
+                    >
+                      {emoji}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Balas */}
           <button
             onClick={() => {
               setReplyingTo(messageContextMenu.message);
               setMessageContextMenu(null);
+              setTimeout(() => {
+                chatInputRef.current?.focus();
+              }, 50);
             }}
-            className="w-full px-3.5 py-2 hover:bg-[#f5f6f6] flex items-center gap-2.5 text-left"
+            className="w-full px-3.5 py-2 hover:bg-[#f5f6f6] flex items-center gap-2.5 text-left cursor-pointer"
           >
             <CornerUpLeft className="w-4 h-4 text-[#128c7e]" />
             <span>Balas Pesan</span>
