@@ -3,6 +3,7 @@ import {
   signInWithPopup, 
   signOut as firebaseSignOut,
   onAuthStateChanged,
+  signInAnonymously,
   User as FirebaseUser
 } from 'firebase/auth';
 import { 
@@ -112,6 +113,12 @@ export const signUp = async (
   setActiveUserId(newUserRef.id);
   
   return { user: userProfile, code };
+};
+
+export const createGuestAccount = async (): Promise<{ user: UserProfile; code: string }> => {
+  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+  const guestName = `Tamu #${randomSuffix}`;
+  return await signUp(guestName);
 };
 
 export const signInWithCode = async (code: string, password?: string): Promise<UserProfile> => {

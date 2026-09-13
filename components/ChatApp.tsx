@@ -2208,9 +2208,13 @@ export default function ChatApp() {
                   <span>Tes Notifikasi</span>
                 </button>
               )}
-              {firebaseUser?.email && (
+              {firebaseUser?.isAnonymous ? (
+                <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded">
+                  Mode Tamu
+                </span>
+              ) : firebaseUser?.email ? (
                 <span className="truncate max-w-[110px] text-[#888]">{firebaseUser.email}</span>
-              )}
+              ) : null}
             </div>
           </div>
 
