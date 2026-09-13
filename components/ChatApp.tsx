@@ -116,6 +116,17 @@ export default function ChatApp() {
   const [unlockError, setUnlockError] = useState('');
   const [unlockLoading, setUnlockLoading] = useState(false);
 
+  // Track isAppLocked and activeChat in refs for async event listeners and privacy mode
+  const isAppLockedRef = useRef(isAppLocked);
+  useEffect(() => {
+    isAppLockedRef.current = isAppLocked;
+  }, [isAppLocked]);
+
+  const activeChatIdRef = useRef<string | null>(activeChat?.id || null);
+  useEffect(() => {
+    activeChatIdRef.current = activeChat?.id || null;
+  }, [activeChat?.id]);
+
   // Desktop Notifications
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>(() => {
     if (typeof window === 'undefined' || !('Notification' in window)) return 'default';
@@ -232,9 +243,19 @@ export default function ChatApp() {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   // File upload, image lightbox & scroll
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+
+  // Auto-focus chat box when replying to a message
+  useEffect(() => {
+    if (replyingTo) {
+      setTimeout(() => {
+        chatInputRef.current?.focus();
+      }, 50);
+    }
+  }, [replyingTo]);
   const [uploadingStatus, setUploadingStatus] = useState<string | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [activeLightboxImage, setActiveLightboxImage] = useState<{
@@ -356,6 +377,64 @@ export default function ChatApp() {
       delete pingTimersRef.current[chatId];
     }
   }, []);
+
+  // Check if there is an active PING in the currently open chat directed at current user
+  const hasActivePingForMe = useMemo(() => {
+    if (!activeChat || !user) return false;
+    const ap = activeChat.activePing;
+    if (!ap) {
+      // Fallback: check if the latest message was an unread PING from another user
+      return Boolean(
+        activeChat.lastMessage === '🔔 PING!' &&
+        activeChat.unreadFor?.includes(user.id) &&
+        activeChat.lastMessageSender !== profile?.name
+      );
+    }
+    return Boolean(ap.active && ap.senderId !== user.id);
+  }, [activeChat, user, profile?.name]);
+
+  const activePingSenderName = useMemo(() => {
+    if (!activeChat) return 'Rekan Kerja';
+    return activeChat.activePing?.senderName || activeChat.lastMessageSender || 'Rekan Kerja';
+  }, [activeChat]);
+
+  // Recipient clicks "Stop Ping": stops audio loop, clears ping signal, provides feedback
+  const handleStopPingFeedback = useCallback(async () => {
+    if (!activeChat || !user || !profile) return;
+    
+    // 1. Immediately stop local audio chime loop
+    stopPingForChat(activeChat.id);
+
+    // 2. Mark activePing as stopped in Firestore with user acknowledgment feedback
+    try {
+      const chatRef = doc(db, 'chats', activeChat.id);
+      await updateDoc(chatRef, {
+        'activePing.active': false,
+        'activePing.stoppedBy': user.id,
+        'activePing.stoppedByName': profile.name,
+        'activePing.stoppedAt': Date.now(),
+        unreadFor: arrayRemove(user.id)
+      });
+
+      // 3. Immediate local state update
+      setActiveChat((prev: any) => prev ? {
+        ...prev,
+        activePing: {
+          ...(prev.activePing || {}),
+          active: false,
+          stoppedBy: user.id,
+          stoppedByName: profile.name,
+          stoppedAt: Date.now()
+        },
+        unreadFor: (prev.unreadFor || []).filter((id: string) => id !== user.id)
+      } : prev);
+
+      showToast('✓ Sinyal PING dihentikan. Konfirmasi Anda telah terkirim.');
+    } catch (err) {
+      console.error('Error stopping ping:', err);
+      showToast('Sinyal PING dihentikan.');
+    }
+  }, [activeChat, user, profile, stopPingForChat, showToast]);
 
   // Message pagination (Quota-friendly: only fetch the last 50 messages by default)
   const [messagesLimit, setMessagesLimit] = useState(50);
@@ -489,6 +568,45 @@ export default function ChatApp() {
     }
   }, [showToast]);
 
+  // Desktop & in-app notification dispatcher with Privacy Mode when App is Locked
+  const notifyIncoming = useCallback((params: {
+    senderName: string;
+    chatName?: string;
+    isGroup?: boolean;
+    messageText?: string;
+    isPing?: boolean;
+  }) => {
+    const isLocked = isAppLockedRef.current;
+    
+    if (params.isPing) {
+      playSound('ping');
+      const title = `🔔 PING! dari ${params.senderName}`;
+      // In privacy mode when app is locked: only the sender's name is exposed, hide contents
+      const body = isLocked 
+        ? 'Panggilan perhatian masuk (Layar Terkunci)'
+        : (params.chatName ? `Panggilan perhatian di ${params.chatName}` : 'Panggilan perhatian masuk di ECP Connect!');
+      
+      sendDesktopNotification(title, body, true);
+      if (!isLocked) {
+        showToast(`🔔 PING diterima dari ${params.senderName}!`);
+      }
+      return;
+    }
+
+    playSound('receive');
+    // Privacy mode when app is locked: ONLY show sender's name!
+    const title = isLocked
+      ? (params.isGroup && params.chatName ? `${params.senderName} (${params.chatName})` : `${params.senderName}`)
+      : (params.isGroup && params.chatName ? `[${params.chatName}] ${params.senderName}` : `Pesan baru dari ${params.senderName}`);
+    
+    // Privacy body: do NOT reveal message content on locked screen
+    const body = isLocked 
+      ? 'Pesan baru diterima (Layar Terkunci)' 
+      : (params.messageText || 'Pesan baru diterima');
+
+    sendDesktopNotification(title, body, true);
+  }, [sendDesktopNotification, showToast]);
+
   const testDesktopNotification = useCallback(() => {
     playSound('ping');
     sendDesktopNotification(
@@ -610,17 +728,19 @@ export default function ChatApp() {
       setChats(chatData);
 
       // Keep activeChat updated without opening a separate duplicate onSnapshot listener
-      if (activeChat?.id) {
-        const fresh = chatData.find((c: any) => c.id === activeChat.id);
+      const currentActiveId = activeChatIdRef.current;
+      if (currentActiveId) {
+        const fresh = chatData.find((c: any) => c.id === currentActiveId);
         if (fresh) {
           setActiveChat((prev: any) => (prev?.id === fresh.id ? { ...prev, ...fresh } : prev));
         }
       }
 
-      // Check unread status for active ping timers
+      // Check unread status and activePing status for active ping timers
       chatData.forEach((chat: any) => {
         const isUnreadForMe = chat.unreadFor?.includes(user.id);
-        if (!isUnreadForMe && pingTimersRef.current[chat.id]) {
+        const hasActivePing = chat.activePing ? (chat.activePing.active && chat.activePing.senderId !== user.id) : isUnreadForMe;
+        if ((!isUnreadForMe || !hasActivePing) && pingTimersRef.current[chat.id]) {
           clearInterval(pingTimersRef.current[chat.id]);
           delete pingTimersRef.current[chat.id];
         }
@@ -632,21 +752,26 @@ export default function ChatApp() {
             const chat: any = change.doc.data();
             const chatId = change.doc.id;
             const isUnreadForMe = chat.unreadFor?.includes(user.id);
-            const isCurrentActiveChat = activeChat?.id === chatId;
+            const isCurrentActiveChat = activeChatIdRef.current === chatId;
             const isWindowHidden = typeof document !== 'undefined' && document.hidden;
+            const isAppLockedCurrent = isAppLockedRef.current;
 
-            if (isUnreadForMe && (!isCurrentActiveChat || isWindowHidden)) {
-              const isPing = chat.lastMessage?.includes('🔔 PING!');
+            // Only consider recent activity (within 30 seconds) so opening or modifying older chats never plays sound
+            const lastTime = chat.lastMessageTime?.toDate ? chat.lastMessageTime.toDate().getTime() : (chat.activePing?.timestamp || 0);
+            const isRecent = lastTime > 0 && Math.abs(Date.now() - lastTime) < 30000;
+
+            if (isUnreadForMe && (!isCurrentActiveChat || isWindowHidden || isAppLockedCurrent) && isRecent) {
+              const isPing = chat.lastMessage?.includes('🔔 PING!') || (chat.activePing?.active && chat.activePing?.senderId !== user.id);
               const senderName = chat.lastMessageSender || (chat.participantNames ? Object.values(chat.participantNames).join(', ') : 'Rekan Kerja');
 
               if (isPing) {
-                playSound('ping');
-                sendDesktopNotification(
-                  `🔔 PING! dari ${senderName}`,
-                  `Panggilan perhatian di ${chat.name || 'ECP Connect'}`
-                );
-                showToast(`🔔 PING diterima dari ${senderName}!`);
-                
+                notifyIncoming({
+                  senderName,
+                  chatName: chat.name,
+                  isGroup: chat.type === 'group',
+                  isPing: true
+                });
+
                 // Repetitive ping interval (every 5 seconds for 1 minute max = 12 times)
                 if (change.type === 'added' || (change.type === 'modified' && chat.lastMessageTime)) {
                   if (pingTimersRef.current[chatId]) {
@@ -661,21 +786,22 @@ export default function ChatApp() {
                       delete pingTimersRef.current[chatId];
                       return;
                     }
-                    playSound('ping');
-                    sendDesktopNotification(
-                      `🔔 PING! Panggilan Mendesak`,
-                      `Dari ${senderName} di ${chat.name || 'ECP Connect'}`,
-                      true
-                    );
+                    notifyIncoming({
+                      senderName,
+                      chatName: chat.name,
+                      isGroup: chat.type === 'group',
+                      isPing: true
+                    });
                   }, 5000);
                 }
               } else {
-                playSound('receive');
-                sendDesktopNotification(
-                  chat.type === 'group' ? `[${chat.name}] ${senderName}` : `Pesan baru dari ${senderName}`,
-                  chat.lastMessage || 'Pesan baru diterima',
-                  true // fallback to toast
-                );
+                notifyIncoming({
+                  senderName,
+                  chatName: chat.name,
+                  isGroup: chat.type === 'group',
+                  messageText: chat.lastMessage,
+                  isPing: false
+                });
               }
             }
           }
@@ -692,7 +818,7 @@ export default function ChatApp() {
       unsubscribe();
       Object.values(timersRef.current).forEach(clearInterval);
     };
-  }, [user?.id, activeChat?.id, sendDesktopNotification, showToast]);
+  }, [user?.id, notifyIncoming]);
 
   // 5. Fetch Messages for Active Chat & Mark as Read (Quota-Optimized with limitToLast & smart auto-scroll)
   const activeChatUnreadFor = activeChat?.unreadFor;
@@ -744,6 +870,8 @@ export default function ChatApp() {
       setMessages(msgData);
       setHasMoreMessages(snapshot.docs.length >= messagesLimit);
 
+      const wasInitialLoad = isInitialMsgLoadRef.current;
+
       // Handle loading older messages scroll position restoration
       if (prevScrollHeightRef.current > 0) {
         const el = messagesContainerRef.current;
@@ -753,14 +881,12 @@ export default function ChatApp() {
           prevScrollHeightRef.current = 0;
         }
         setLoadingOlderMessages(false);
-      } else if (isInitialMsgLoadRef.current) {
+      } else if (wasInitialLoad) {
         // Initial chat load: auto-scroll to the bottom immediately and retry as images load
         isInitialMsgLoadRef.current = false;
         isNearBottomRef.current = true;
         setShowScrollBottomBtn(false);
         setNewMessagesWhileScrolled(0);
-        // Stop ping loop if this chat had active ping
-        stopPingForChat(currentChatId);
         // Instant scroll down
         scrollToBottom(false);
         setTimeout(() => scrollToBottom(false), 50);
@@ -786,28 +912,32 @@ export default function ChatApp() {
         }
       }
 
-      // Only process notifications for real-time newly arriving messages (not during historical bootstrap)
-      if (!isInitialMsgLoadRef.current) {
+      // ONLY process notifications for real-time newly arriving messages (NEVER during historical bootstrap)
+      if (!wasInitialLoad) {
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             const newMsg = change.doc.data();
             if (newMsg.senderId && newMsg.senderId !== user.id) {
-              if (newMsg.type === 'ping') {
-                playSound('ping');
-                sendDesktopNotification(
-                  `🔔 PING! dari ${newMsg.senderName || 'Rekan Kerja'}`,
-                  'Panggilan perhatian masuk di ECP Connect!'
-                );
-                showToast(`🔔 PING diterima dari ${newMsg.senderName || 'Rekan'}!`);
-              } else {
-                if (typeof document !== 'undefined' && document.hidden) {
-                  playSound('receive');
-                  sendDesktopNotification(
-                    `ECP Connect: ${newMsg.senderName || 'Pesan Baru'}`,
-                    newMsg.text || 'Mengirim lampiran file',
-                    true
-                  );
-                }
+              const msgTime = newMsg.timestamp?.toDate ? newMsg.timestamp.toDate().getTime() : (newMsg.clientTime || 0);
+              const isRecent = msgTime > 0 && Math.abs(Date.now() - msgTime) < 30000;
+              const isWindowHidden = typeof document !== 'undefined' && document.hidden;
+              const isLocked = isAppLockedRef.current;
+
+              if (newMsg.type === 'ping' && isRecent) {
+                notifyIncoming({
+                  senderName: newMsg.senderName || 'Rekan Kerja',
+                  chatName: activeChat.name,
+                  isGroup: isGroup,
+                  isPing: true
+                });
+              } else if (isRecent && (isWindowHidden || isLocked)) {
+                notifyIncoming({
+                  senderName: newMsg.senderName || 'Pesan Baru',
+                  chatName: activeChat.name,
+                  isGroup: isGroup,
+                  messageText: newMsg.text,
+                  isPing: false
+                });
               }
 
               // Update message document to track who read it using arrayUnion
@@ -832,7 +962,7 @@ export default function ChatApp() {
     });
 
     return () => unsubscribe();
-  }, [activeChat?.id, activeChat?.type, activeChatUnreadFor, user?.id, messagesLimit, loadAllTimeMessages, showToast, sendDesktopNotification, scrollToBottom, stopPingForChat]);
+  }, [activeChat?.id, activeChat?.type, activeChat?.name, activeChatUnreadFor, user?.id, messagesLimit, loadAllTimeMessages, showToast, notifyIncoming, scrollToBottom]);
 
   // 6. Track Presence of the Other User in Active Chat (Single Document Listener)
   const otherContactId = (activeChat && activeChat.type !== 'group' && user?.id)
@@ -935,7 +1065,16 @@ export default function ChatApp() {
         lastMessage: '🔔 PING!',
         lastMessageSender: profile.name,
         lastMessageTime: serverTimestamp(),
-        unreadFor: otherUserIds
+        unreadFor: otherUserIds,
+        activePing: {
+          id: 'ping_' + Date.now(),
+          senderId: user.id,
+          senderName: profile.name,
+          timestamp: Date.now(),
+          active: true,
+          stoppedBy: null,
+          stoppedByName: null
+        }
       });
 
       showToast('🔔 PING terkirim!');
@@ -1308,11 +1447,17 @@ export default function ChatApp() {
     );
   }, [mentionQuery, activeGroupMembers]);
 
-  const handleMessageInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMessageInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const val = e.target.value;
     const pos = e.target.selectionStart || val.length;
     setNewMessage(val);
     setMentionCursorPos(pos);
+
+    // Auto-resize chat input textarea
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = 'auto';
+      chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+    }
 
     if (activeChat?.type === 'group') {
       const textBeforeCursor = val.slice(0, pos);
@@ -1327,6 +1472,44 @@ export default function ChatApp() {
     }
   };
 
+  // Handle paragraph / new line on Shift+Enter or Alt+Enter
+  const handleChatInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter') {
+      if (e.shiftKey || e.altKey) {
+        // Shift+Enter or Alt+Enter inserts a new line / paragraph
+        if (e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          const target = e.currentTarget;
+          const start = target.selectionStart;
+          const end = target.selectionEnd;
+          const val = target.value;
+          const updated = val.substring(0, start) + '\n' + val.substring(end);
+          setNewMessage(updated);
+          setTimeout(() => {
+            if (chatInputRef.current) {
+              chatInputRef.current.selectionStart = chatInputRef.current.selectionEnd = start + 1;
+              chatInputRef.current.style.height = 'auto';
+              chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+            }
+          }, 0);
+        } else {
+          // Shift+Enter natively creates a newline in textarea; adjust height smoothly
+          setTimeout(() => {
+            if (chatInputRef.current) {
+              chatInputRef.current.style.height = 'auto';
+              chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+            }
+          }, 0);
+        }
+        return;
+      }
+
+      // Normal Enter without modifier sends the message
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
   const insertMention = (name: string) => {
     const textBeforeCursor = newMessage.slice(0, mentionCursorPos);
     const lastAt = textBeforeCursor.lastIndexOf('@');
@@ -1336,6 +1519,13 @@ export default function ChatApp() {
       const updated = `${prefix}@${name} ${suffix}`;
       setNewMessage(updated);
       setMentionQuery(null);
+      setTimeout(() => {
+        if (chatInputRef.current) {
+          chatInputRef.current.style.height = 'auto';
+          chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+          chatInputRef.current.focus();
+        }
+      }, 0);
     }
   };
 
@@ -1399,6 +1589,9 @@ export default function ChatApp() {
 
     setOptimisticMessages(prev => [...prev, optimisticMsg]);
     setNewMessage('');
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = 'auto';
+    }
     setMentionQuery(null);
     setReplyingTo(null);
     setSendingFailed(null);
@@ -1647,9 +1840,9 @@ export default function ChatApp() {
     e.preventDefault();
     e.stopPropagation();
 
-    // Calculate menu position within viewport
-    const x = Math.min(e.clientX, window.innerWidth - 220);
-    const y = Math.min(e.clientY, window.innerHeight - 260);
+    // Calculate menu position within viewport safely
+    const x = Math.min(Math.max(10, e.clientX), window.innerWidth - 240);
+    const y = Math.min(Math.max(10, e.clientY), window.innerHeight - 340);
 
     setMessageContextMenu({ x, y, message: msg });
     setChatContextMenu(null);
@@ -2015,9 +2208,13 @@ export default function ChatApp() {
                   <span>Tes Notifikasi</span>
                 </button>
               )}
-              {firebaseUser?.email && (
+              {firebaseUser?.isAnonymous ? (
+                <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded">
+                  Mode Tamu
+                </span>
+              ) : firebaseUser?.email ? (
                 <span className="truncate max-w-[110px] text-[#888]">{firebaseUser.email}</span>
-              )}
+              ) : null}
             </div>
           </div>
 
@@ -2210,11 +2407,24 @@ export default function ChatApp() {
                       {otherCode ? <span className="font-mono text-[#128c7e] font-bold mr-1">[{otherCode}]</span> : null}
                       {chat.lastMessage || 'Belum ada pesan'}
                     </p>
-                    {isUnread && (
-                      <span className="ml-2 bg-[#25d366] text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full shrink-0 shadow-xs">
-                        Baru
-                      </span>
-                    )}
+                    {(() => {
+                      const hasActivePing = chat.activePing?.active && chat.activePing?.senderId !== user?.id;
+                      if (hasActivePing) {
+                        return (
+                          <span className="ml-2 bg-red-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full shrink-0 shadow-xs animate-pulse flex items-center gap-1">
+                            <Radio className="w-2.5 h-2.5" /> PING
+                          </span>
+                        );
+                      }
+                      if (isUnread) {
+                        return (
+                          <span className="ml-2 bg-[#25d366] text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full shrink-0 shadow-xs">
+                            Baru
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                 </div>
               </div>
@@ -2462,6 +2672,59 @@ export default function ChatApp() {
             </div>
           )}
           
+          {/* Active Ping Attention Banner with Stop Ping Button for Recipient */}
+          {hasActivePingForMe && (
+            <div className="bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 text-white px-3.5 md:px-4 py-2.5 md:py-3 shadow-md flex items-center justify-between gap-3 border-b border-red-700/30 shrink-0 z-20 transition-all animate-in fade-in slide-in-from-top-1 duration-200">
+              <div className="flex items-center gap-2.5 md:gap-3 min-w-0">
+                <div className="w-8 h-8 md:w-9 md:h-9 rounded-xl bg-white/20 flex items-center justify-center shrink-0 animate-pulse">
+                  <Radio className="w-4 h-4 md:w-5 md:h-5 text-white" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] md:text-xs font-black uppercase tracking-wider bg-white/25 px-2 py-0.5 rounded-md">
+                      🔔 Panggilan PING Masuk
+                    </span>
+                    <span className="text-[11px] md:text-xs font-semibold text-white/95 truncate">
+                      dari {activePingSenderName}
+                    </span>
+                  </div>
+                  <p className="text-[10px] md:text-[11px] text-white/85 truncate mt-0.5">
+                    Pengirim meminta perhatian segera. Klik tombol untuk mengonfirmasi respons dan mematikan sinyal.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleStopPingFeedback}
+                className="px-3.5 md:px-4 py-1.5 md:py-2 bg-white hover:bg-red-50 text-red-700 font-extrabold text-xs rounded-xl shadow-md active:scale-95 transition-all flex items-center gap-1.5 shrink-0 cursor-pointer border border-white/60"
+                title="Hentikan sinyal PING dan kirim konfirmasi bahwa Anda sudah merespons"
+              >
+                <BellOff className="w-4 h-4 text-red-600" />
+                <span>Stop Ping</span>
+              </button>
+            </div>
+          )}
+
+          {/* Feedback banner for Sender when recipient has stopped the ping */}
+          {activeChat.activePing && !activeChat.activePing.active && activeChat.activePing.senderId === user?.id && activeChat.activePing.stoppedByName && (
+            <div className="bg-emerald-50 border-b border-emerald-200 px-4 py-2 flex items-center justify-between text-[11px] text-emerald-800 shrink-0 z-10 animate-in fade-in duration-150">
+              <span className="flex items-center gap-1.5 font-medium">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>PING Anda telah direspons oleh <strong className="font-bold">{activeChat.activePing.stoppedByName}</strong></span>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  updateDoc(doc(db, 'chats', activeChat.id), { activePing: null }).catch(() => {});
+                  setActiveChat((prev: any) => prev ? { ...prev, activePing: null } : prev);
+                }}
+                className="text-emerald-700 hover:text-emerald-900 text-[10px] font-bold underline cursor-pointer ml-2"
+              >
+                Tutup
+              </button>
+            </div>
+          )}
+          
           {/* Message Stream */}
           <div 
             ref={messagesContainerRef}
@@ -2567,26 +2830,6 @@ export default function ChatApp() {
                     )}
                     
                     <div className="relative flex items-center gap-1 max-w-[90%] md:max-w-[75%]">
-                      {/* Floating Quick Reaction Bar (WhatsApp style on hover) */}
-                      {isHovered && !msg.isDeleted && (
-                        <div 
-                          className={`absolute -top-7 ${isMine ? 'right-0' : 'left-0'} z-20 bg-white/95 backdrop-blur-xs shadow-md border border-[#e1e4e8] rounded-full px-2 py-0.5 flex items-center gap-1 animate-in fade-in zoom-in-95 duration-100`}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
-                            <button
-                              key={emoji}
-                              type="button"
-                              onClick={() => handleToggleReaction(msg, emoji)}
-                              className="text-xs hover:scale-125 transition-transform p-0.5 cursor-pointer"
-                              title={`Beri reaksi ${emoji}`}
-                            >
-                              {emoji}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-
                       <div className={`p-2.5 rounded-xl shadow-xs relative transition-all w-full ${
                         msg.type === 'sticker' 
                           ? 'bg-transparent shadow-none p-0' 
@@ -2952,6 +3195,13 @@ export default function ChatApp() {
                 onClose={() => setShowEmojiPicker(false)}
                 onSelectEmoji={(emoji) => {
                   setNewMessage(prev => prev + emoji);
+                  setTimeout(() => {
+                    if (chatInputRef.current) {
+                      chatInputRef.current.style.height = 'auto';
+                      chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 128)}px`;
+                      chatInputRef.current.focus();
+                    }
+                  }, 0);
                 }}
                 onSelectSticker={(stickerUrl) => {
                   setShowEmojiPicker(false);
@@ -2987,19 +3237,22 @@ export default function ChatApp() {
               <Paperclip className="w-5 h-5" />
             </button>
 
-            <form onSubmit={sendMessage} className="flex items-center gap-2 flex-1">
-              <input
-                type="text"
+            <form onSubmit={sendMessage} className="flex items-end gap-2 flex-1">
+              <textarea
+                ref={chatInputRef}
                 value={newMessage}
                 onChange={handleMessageInputChange}
+                onKeyDown={handleChatInputKeyDown}
                 onPaste={handlePaste}
-                placeholder={activeChat.type === 'group' ? "Ketik pesan atau ketik @ untuk tag anggota..." : "Ketik pesan atau tempel gambar..."}
-                className="flex-1 bg-white border-none rounded-xl px-4 py-2.5 text-xs outline-none shadow-xs text-[#1c1e21] focus:ring-1 focus:ring-[#128c7e]"
+                rows={1}
+                placeholder={activeChat.type === 'group' ? "Ketik pesan atau ketik @ untuk tag... (Shift+Enter untuk baris baru)" : "Ketik pesan atau tempel gambar... (Shift+Enter untuk baris baru)"}
+                className="flex-1 bg-white border-none rounded-xl px-4 py-2.5 text-xs outline-none shadow-xs text-[#1c1e21] focus:ring-1 focus:ring-[#128c7e] resize-none max-h-32 min-h-[38px] leading-relaxed custom-scrollbar"
               />
               <button 
                 type="submit"
                 disabled={!newMessage.trim() || isUploadingMedia}
-                className="bg-[#128c7e] p-2.5 rounded-full text-white cursor-pointer hover:bg-[#0f7a6d] transition-colors disabled:opacity-40 disabled:hover:bg-[#128c7e] shadow-sm shrink-0"
+                className="bg-[#128c7e] p-2.5 rounded-full text-white cursor-pointer hover:bg-[#0f7a6d] transition-colors disabled:opacity-40 disabled:hover:bg-[#128c7e] shadow-sm shrink-0 mb-0.5"
+                title="Kirim Pesan (Enter)"
               >
                 <Send className="w-4 h-4 ml-0.5" />
               </button>
@@ -3089,17 +3342,48 @@ export default function ChatApp() {
       {/* ========================================== */}
       {messageContextMenu && (
         <div 
-          className="fixed z-50 bg-white rounded-xl shadow-xl border border-[#e1e4e8] py-1.5 w-52 text-xs font-medium text-[#1c1e21] animate-in fade-in zoom-in-95 duration-100"
+          className="fixed z-50 bg-white rounded-xl shadow-xl border border-[#e1e4e8] py-1.5 w-56 text-xs font-medium text-[#1c1e21] animate-in fade-in zoom-in-95 duration-100 overflow-hidden"
           style={{ top: messageContextMenu.y, left: messageContextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
+          {/* Reaction Bar: Muncul saat klik kanan atau klik titik 3 */}
+          {!messageContextMenu.message.isDeleted && (
+            <div className="px-3 py-2 border-b border-[#f0f2f5] bg-[#f8fafc] mb-1">
+              <div className="text-[10px] text-[#64748b] font-medium mb-1.5 px-0.5">Reaksi Pesan:</div>
+              <div className="flex items-center justify-between gap-1">
+                {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => {
+                  const hasReacted = messageContextMenu.message.reactions?.[emoji]?.includes(user?.id);
+                  return (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => {
+                        handleToggleReaction(messageContextMenu.message, emoji);
+                        setMessageContextMenu(null);
+                      }}
+                      className={`text-base p-1 rounded-lg transition-all hover:scale-130 active:scale-110 cursor-pointer ${
+                        hasReacted ? 'bg-[#d9fdd3] ring-1 ring-[#25d366]' : 'hover:bg-slate-200/60'
+                      }`}
+                      title={`Beri reaksi ${emoji}`}
+                    >
+                      {emoji}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Balas */}
           <button
             onClick={() => {
               setReplyingTo(messageContextMenu.message);
               setMessageContextMenu(null);
+              setTimeout(() => {
+                chatInputRef.current?.focus();
+              }, 50);
             }}
-            className="w-full px-3.5 py-2 hover:bg-[#f5f6f6] flex items-center gap-2.5 text-left"
+            className="w-full px-3.5 py-2 hover:bg-[#f5f6f6] flex items-center gap-2.5 text-left cursor-pointer"
           >
             <CornerUpLeft className="w-4 h-4 text-[#128c7e]" />
             <span>Balas Pesan</span>

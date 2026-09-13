@@ -3,6 +3,7 @@ import {
   signInWithPopup, 
   signOut as firebaseSignOut,
   onAuthStateChanged,
+  signInAnonymously,
   User as FirebaseUser
 } from 'firebase/auth';
 import { 
@@ -114,6 +115,12 @@ export const signUp = async (
   return { user: userProfile, code };
 };
 
+export const createGuestAccount = async (): Promise<{ user: UserProfile; code: string }> => {
+  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+  const guestName = `Tamu #${randomSuffix}`;
+  return await signUp(guestName);
+};
+
 export const signInWithCode = async (code: string, password?: string): Promise<UserProfile> => {
   const formattedCode = code.trim().toUpperCase();
   const q = query(collection(db, 'users'), where('code', '==', formattedCode));
@@ -216,6 +223,21 @@ export const updateUserProfilePhoto = async (userId: string, photoURL: string) =
     });
   } catch (e) {
     console.error('Error updating profile photo', e);
+    throw e;
+  }
+};
+
+export const updateUserPassword = async (userId: string, newPassword: string): Promise<string> => {
+  if (!userId) return '';
+  const passwordHash = newPassword ? await hashPassword(newPassword) : '';
+  try {
+    await updateDoc(doc(db, 'users', userId), {
+      passwordHash,
+      lastSeen: serverTimestamp()
+    });
+    return passwordHash;
+  } catch (e) {
+    console.error('Error updating password', e);
     throw e;
   }
 };

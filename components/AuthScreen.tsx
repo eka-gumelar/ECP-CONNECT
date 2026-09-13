@@ -2,14 +2,14 @@
 
 import React, { useState } from 'react';
 import { useAuth } from './AuthProvider';
-import { signInWithCode, signUp } from '@/lib/auth';
+import { signInWithCode, signUp, createGuestAccount, getStoredUserId } from '@/lib/auth';
 import { 
   UserPlus, LogIn, Key, CheckCircle, Copy, ArrowRight, 
-  ShieldCheck, LogOut, AlertCircle, Lock
+  ShieldCheck, LogOut, AlertCircle, Lock, User
 } from 'lucide-react';
 
 export default function AuthScreen() {
-  const { firebaseUser, signInGoogle, signOutGoogleAuth } = useAuth();
+  const { firebaseUser, signInGoogle, signInGuest, signOutGoogleAuth } = useAuth();
 
   const [authTab, setAuthTab] = useState<'code' | 'register'>('code');
   const [code, setCode] = useState('');
@@ -18,6 +18,7 @@ export default function AuthScreen() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [guestLoading, setGuestLoading] = useState(false);
   const [registeredCode, setRegisteredCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -31,6 +32,27 @@ export default function AuthScreen() {
       setError(err.message || 'Gagal login dengan Google. Pastikan popup browser diizinkan.');
     } finally {
       setGoogleLoading(false);
+    }
+  };
+
+  const handleGuestLogin = async (directChat: boolean = true) => {
+    setError('');
+    setGuestLoading(true);
+    try {
+      await signInGuest();
+
+      if (directChat) {
+        // If user does not already have an active profile stored, create an instant guest profile
+        const storedId = getStoredUserId();
+        if (!storedId) {
+          await createGuestAccount();
+        }
+      }
+    } catch (err: any) {
+      console.error('Guest login error:', err);
+      setError(err.message || 'Gagal masuk sebagai tamu. Silakan coba lagi.');
+    } finally {
+      setGuestLoading(false);
     }
   };
 
@@ -84,7 +106,7 @@ export default function AuthScreen() {
     }
   };
 
-  // 1. If not logged in with Google yet: Show Google Auth Gate
+  // 1. If not logged in with Google/Guest yet: Show Auth Gate
   if (!firebaseUser) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#f0f2f5] p-4 font-sans text-[#1c1e21]">
@@ -101,10 +123,10 @@ export default function AuthScreen() {
 
           <div className="bg-white p-7 rounded-2xl shadow-sm border border-[#e1e4e8]">
             <h2 className="text-base font-bold text-[#1c1e21] mb-2 text-center">
-              Langkah 1: Otorisasi Perangkat dengan Google
+              Masuk ke ECP Connect
             </h2>
             <p className="text-xs text-[#54656f] text-center mb-6 leading-relaxed">
-              Login dengan akun Google Anda untuk verifikasi identitas perangkat. Setelah login, Anda akan diminta memasukkan kode unik 6 digit Anda.
+              Login dengan akun Google Anda atau masuk instan sebagai tamu untuk memulai komunikasi internal.
             </p>
 
             {error && (
@@ -114,16 +136,18 @@ export default function AuthScreen() {
               </div>
             )}
 
+            {/* Tombol Login Google */}
             <button
+              id="google-login-btn"
               onClick={handleGoogleLogin}
-              disabled={googleLoading}
-              className="w-full py-3 px-4 bg-white border border-[#dadce0] hover:bg-[#f8f9fa] text-[#3c4043] rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-3 shadow-xs hover:shadow-sm active:scale-[0.99]"
+              disabled={googleLoading || guestLoading}
+              className="w-full py-3 px-4 bg-white border border-[#dadce0] hover:bg-[#f8f9fa] text-[#3c4043] rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-3 shadow-xs hover:shadow-sm active:scale-[0.99] cursor-pointer disabled:opacity-50"
             >
               {googleLoading ? (
                 <div className="w-5 h-5 border-2 border-[#128c7e]/30 border-t-[#128c7e] rounded-full animate-spin" />
               ) : (
                 <>
-                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
                     <path
                       fill="#4285F4"
                       d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -145,6 +169,43 @@ export default function AuthScreen() {
                 </>
               )}
             </button>
+
+            {/* Garis Pemisah (Divider) */}
+            <div className="relative my-4 flex items-center justify-center">
+              <div className="border-t border-[#e1e4e8] w-full"></div>
+              <span className="bg-white px-3 text-[11px] font-semibold text-[#8696a0] uppercase tracking-wider">
+                atau
+              </span>
+            </div>
+
+            {/* Tombol Login as Guest (Masuk sebagai Tamu) */}
+            <button
+              id="guest-login-btn"
+              onClick={() => handleGuestLogin(true)}
+              disabled={guestLoading || googleLoading}
+              className="w-full py-3 px-4 bg-[#f0f2f5] hover:bg-[#e4e6eb] border border-[#d1d7db] hover:border-[#b0b3b8] text-[#1c1e21] rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2.5 shadow-xs hover:shadow-sm active:scale-[0.99] cursor-pointer disabled:opacity-50"
+            >
+              {guestLoading ? (
+                <div className="w-5 h-5 border-2 border-[#128c7e]/30 border-t-[#128c7e] rounded-full animate-spin" />
+              ) : (
+                <>
+                  <User className="w-4 h-4 text-[#128c7e]" />
+                  <span>Login as Guest (Masuk sebagai Tamu)</span>
+                </>
+              )}
+            </button>
+
+            {/* Alternatif: Masuk dengan Kode Langsung */}
+            <div className="mt-3.5 text-center">
+              <button
+                type="button"
+                onClick={() => handleGuestLogin(false)}
+                disabled={guestLoading || googleLoading}
+                className="text-[11px] text-[#128c7e] hover:text-[#0f7a6d] hover:underline font-semibold cursor-pointer transition-colors"
+              >
+                Sudah punya kode 6-digit? Masuk tanpa akun Google
+              </button>
+            </div>
 
             <div className="mt-6 pt-5 border-t border-[#f0f2f5] text-center">
               <span className="inline-flex items-center gap-1.5 text-[11px] text-[#667781]">
@@ -211,16 +272,18 @@ export default function AuthScreen() {
   // 3. Step 2: Manual Login with 6-Digit Code (NO DIRECTORY)
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-[#f0f2f5] p-4 font-sans text-[#1c1e21] relative overflow-hidden">
-      {/* Tiny Google Verified status tucked in the corner */}
+      {/* Tiny Google/Guest status tucked in the corner */}
       <div className="fixed bottom-3 right-3 z-30 flex items-center gap-1.5 px-2.5 py-1 bg-white/85 backdrop-blur-xs border border-[#dadce0] rounded-full shadow-xs text-[10px] text-[#54656f] hover:bg-white transition-all">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
-        <span className="truncate max-w-[140px] text-[#3c4043] font-mono text-[9px]">{firebaseUser.email}</span>
+        <span className="truncate max-w-[140px] text-[#3c4043] font-mono text-[9px]">
+          {firebaseUser.isAnonymous ? 'Mode Tamu' : (firebaseUser.email || 'Terverifikasi')}
+        </span>
         <span className="text-[#dadce0]">•</span>
         <button
           type="button"
           onClick={() => signOutGoogleAuth()}
-          className="text-red-600 hover:text-red-700 hover:underline text-[9px] font-medium transition-colors"
-          title="Keluar dari akun Google"
+          className="text-red-600 hover:text-red-700 hover:underline text-[9px] font-medium transition-colors cursor-pointer"
+          title={firebaseUser.isAnonymous ? "Keluar dari sesi tamu" : "Keluar dari akun Google"}
         >
           Keluar
         </button>
@@ -306,8 +369,8 @@ export default function AuthScreen() {
 
               <button
                 type="submit"
-                disabled={loading}
-                className="w-full mt-4 py-3 px-4 bg-[#128c7e] hover:bg-[#0f7a6d] text-white rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-60 shadow-sm"
+                disabled={loading || guestLoading}
+                className="w-full mt-4 py-3 px-4 bg-[#128c7e] hover:bg-[#0f7a6d] text-white rounded-xl font-semibold text-sm transition-colors flex items-center justify-center gap-2 disabled:opacity-60 shadow-sm cursor-pointer"
               >
                 {loading ? (
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -318,6 +381,18 @@ export default function AuthScreen() {
                   </>
                 )}
               </button>
+
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => handleGuestLogin(true)}
+                  disabled={loading || guestLoading}
+                  className="text-xs text-[#128c7e] hover:underline font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>Belum punya kode? Masuk instan sebagai Tamu</span>
+                </button>
+              </div>
             </form>
           )}
 
